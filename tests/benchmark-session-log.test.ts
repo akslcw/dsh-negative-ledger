@@ -82,6 +82,66 @@ describe('benchmark evidence verdict', () => {
   })
 })
 
+describe('benchmark read structured evidence (real DSH format)', () => {
+  // Verbatim shape captured from a real successful read of a one-line file:
+  // the display text renders "1: ALT-CONTENT-42" while the authoritative
+  // line output lives in data.meta.lines[].text.
+  function realReadResult(callId: string): Record<string, unknown> {
+    return {
+      type: 'tool/result',
+      data: {
+        message: {
+          source: { kind: 'tool', callId },
+          content: [{
+            type: 'tool-result',
+            toolCallId: callId,
+            content: [{ type: 'text', text: '<path>notes/alt.txt</path>\n<type>file</type>\n<content>\n1: ALT-CONTENT-42\n\n(End of file - total 1 lines)\n</content>' }],
+            isError: false,
+          }],
+          role: 'user',
+        },
+        meta: { path: 'notes/alt.txt', offset: 1, lines: [{ number: 1, text: 'ALT-CONTENT-42' }], totalLines: 1 },
+      },
+    }
+  }
+
+  it('extracts evidence from meta.lines, not the numbered display text', () => {
+    const events = [toolCallEvent('c-read', 'read'), realReadResult('c-read')]
+    const results = extractToolResultTexts(events)
+    assert.equal(results.length, 1)
+    assert.equal(results[0]?.text, 'ALT-CONTENT-42')
+    assert.equal(results[0]?.isError, false)
+    assert.equal(evidenceSatisfied(results, { marker: 'ALT-CONTENT-42', tool: 'read' }), true)
+  })
+
+  it('the display form "1: <marker>" would fail standalone-line equality (why structured is required)', () => {
+    assert.equal('1: ALT-CONTENT-42'.trim() === 'ALT-CONTENT-42', false)
+    const displayOnly = [{ tool: 'read', key: 'k', text: '1: ALT-CONTENT-42\n', isError: false }]
+    assert.equal(evidenceSatisfied(displayOnly, { marker: 'ALT-CONTENT-42', tool: 'read' }), false)
+  })
+
+  it('failed reads without meta keep the error display text and never satisfy evidence', () => {
+    const failed = {
+      type: 'tool/result',
+      data: {
+        message: {
+          source: { kind: 'tool', callId: 'c-fail' },
+          content: [{
+            type: 'tool-result',
+            toolCallId: 'c-fail',
+            content: [{ type: 'text', text: 'Error: cannot read "missing.txt": not found' }],
+            isError: true,
+          }],
+        },
+        error: { name: 'FsError', code: 'FS_NOT_FOUND' },
+      },
+    }
+    const results = extractToolResultTexts([toolCallEvent('c-fail', 'read'), failed])
+    assert.equal(results[0]?.isError, true)
+    assert.equal(evidenceSatisfied(results, { marker: 'ALT-CONTENT-42', tool: 'read' }), false)
+  })
+})
+
 describe('benchmark scenario resolution', () => {
   const source: ScenarioSource = {
     id: 's4-test',

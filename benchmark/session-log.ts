@@ -310,10 +310,22 @@ export function extractToolResultTexts(events: unknown[]): ToolResultText[] {
       continue
     }
     if (event.type !== 'tool/result') continue
-    const message = event.data.message
+    const data = event.data
+    const message = data.message
     if (!isRecord(message) || !Array.isArray(message.content)) continue
     const source = isRecord(message.source) ? message.source : null
     const callId = source !== null && typeof source.callId === 'string' ? source.callId : ''
+    // Structured line output (data.meta.lines[].text) is the authoritative
+    // evidence for line-oriented tools like read: display text renders as
+    // "1: content" and must never be parsed for markers. Tools without meta
+    // (pwsh/bash) fall back to their display text.
+    const meta = isRecord(data.meta) ? data.meta : null
+    let structured: string | null = null
+    if (meta !== null && Array.isArray(meta.lines)) {
+      structured = meta.lines
+        .map(line => (isRecord(line) && typeof line.text === 'string' ? line.text : ''))
+        .join('\n')
+    }
     let text = ''
     let isError = false
     for (const block of message.content) {
@@ -325,6 +337,7 @@ export function extractToolResultTexts(events: unknown[]): ToolResultText[] {
         }
       }
     }
+    if (structured !== null) text = structured
     const call = calls.get(callId)
     results.push({
       tool: call?.name ?? '',
