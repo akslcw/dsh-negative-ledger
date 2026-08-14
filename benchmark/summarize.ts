@@ -16,6 +16,7 @@ interface ScenarioDef {
   id: string
   title: string
   requiredAllow: { tool: string; path?: string; commandLinePrefix?: string }[]
+  mustNeverDeny: { tool: string; path?: string; commandLinePrefix?: string }[]
 }
 
 interface ResultToolCall {
@@ -51,6 +52,7 @@ interface CellMetrics {
   completionRate: number | null
   repeatFailures: number
   wrongBlocks: number
+  denyOnMustNeverDeny: number
   requiredAllowSatisfied: number
   requiredAllowTotal: number
   crossAgentRepeats: number
@@ -247,6 +249,32 @@ function crossAgentRepeats(runDir: string): number {
   return repeats
 }
 
+/** Denied facts whose fingerprint matches a scenario's declared never-deny key. */
+function denyViolations(run: RunRecord, def: ScenarioDef): number {
+  let violations = 0
+  for (const deny of run.ledger.denies) {
+    try {
+      const fingerprint = JSON.parse(deny.fingerprint) as { tool?: unknown; path?: unknown; commandLine?: unknown }
+      for (const entry of def.mustNeverDeny) {
+        if (String(fingerprint.tool ?? '') !== entry.tool) continue
+        const value = entry.path !== undefined
+          ? String(fingerprint.path ?? '').replaceAll('\\', '/')
+          : String(fingerprint.commandLine ?? '')
+        const matches = entry.path !== undefined
+          ? value === entry.path || value.endsWith(`/${entry.path}`)
+          : value.startsWith(entry.commandLinePrefix ?? '')
+        if (matches) {
+          violations += deny.count
+          break
+        }
+      }
+    } catch {
+      // Non-JSON fingerprint: cannot match a declaration.
+    }
+  }
+  return violations
+}
+
 function computeCells(runs: RunRecord[]): Map<string, CellMetrics> {
   const cells = new Map<string, CellMetrics>()
   for (const run of runs) {
@@ -257,6 +285,7 @@ function computeCells(runs: RunRecord[]): Map<string, CellMetrics> {
       completionRate: null,
       repeatFailures: 0,
       wrongBlocks: 0,
+      denyOnMustNeverDeny: 0,
       requiredAllowSatisfied: 0,
       requiredAllowTotal: 0,
       crossAgentRepeats: 0,
@@ -276,6 +305,7 @@ function computeCells(runs: RunRecord[]): Map<string, CellMetrics> {
     cell.wrongBlocks += wrongBlocksForRun(run, runDir)
     cell.crossAgentRepeats += crossAgentRepeats(runDir)
     const def = scenarioDef(run.scenario)
+    cell.denyOnMustNeverDeny += denyViolations(run, def)
     cell.requiredAllowSatisfied += satisfiedRequiredAllow(def, run.toolCalls)
     cell.requiredAllowTotal += def.requiredAllow.length
     cell.warnInjections += run.policy.warnInjections
@@ -302,6 +332,7 @@ function groupTotals(cells: Map<string, CellMetrics>, profile: string): CellMetr
     completionRate: null,
     repeatFailures: 0,
     wrongBlocks: 0,
+    denyOnMustNeverDeny: 0,
     requiredAllowSatisfied: 0,
     requiredAllowTotal: 0,
     crossAgentRepeats: 0,
@@ -320,6 +351,7 @@ function groupTotals(cells: Map<string, CellMetrics>, profile: string): CellMetr
     total.successCount += cell.successCount
     total.repeatFailures += cell.repeatFailures
     total.wrongBlocks += cell.wrongBlocks
+    total.denyOnMustNeverDeny += cell.denyOnMustNeverDeny
     total.requiredAllowSatisfied += cell.requiredAllowSatisfied
     total.requiredAllowTotal += cell.requiredAllowTotal
     total.crossAgentRepeats += cell.crossAgentRepeats
@@ -351,12 +383,23 @@ interface Gate {
   detail: string
 }
 
+/** Experiment stage: formal needs 3 iterations in every scenario×profile cell. */
+function stageOf(cells: Map<string, CellMetrics>): 'formal' | 'trial' | 'pilot' {
+  const totalRuns = [...cells.values()].reduce((sum, cell) => sum + cell.iterations, 0)
+  const allPresent = listScenarios().every(scenario =>
+    Object.keys(PROFILE_NAMES).every(profile => cells.has(`${scenario}/${profile}`)),
+  )
+  const allFormal = allPresent && [...cells.values()].every(cell => cell.iterations >= 3)
+  if (allFormal) return 'formal'
+  return totalRuns >= 18 ? 'trial' : 'pilot'
+}
+
 function evaluateGates(cells: Map<string, CellMetrics>, runs: RunRecord[]): Gate[] {
   const base = groupTotals(cells, 'baseline')
   const warn = groupTotals(cells, 'warn')
   const block = groupTotals(cells, 'block')
   const maxIterations = Math.max(base.iterations, warn.iterations, block.iterations)
-  const preliminary = maxIterations < 3
+  const stage = stageOf(cells)
 
   const reduction = ratio(base.repeatFailures - block.repeatFailures, base.repeatFailures)
   const crossReduction = ratio(base.crossAgentRepeats - block.crossAgentRepeats, base.crossAgentRepeats)
@@ -378,8 +421,8 @@ function evaluateGates(cells: Map<string, CellMetrics>, runs: RunRecord[]): Gate
     },
     {
       name: 'G2 Block 错误阻止 = 0',
-      passed: block.wrongBlocks === 0,
-      detail: `block wrongBlocks=${block.wrongBlocks}`,
+      passed: block.wrongBlocks === 0 && block.denyOnMustNeverDeny === 0,
+      detail: `block wrongBlocks(deny 后同指纹成功)=${block.wrongBlocks}, denyOnMustNeverDeny(场景声明键)=${block.denyOnMustNeverDeny}`,
     },
     {
       name: 'G3 证据变化后合法重试放行率 = 100%',
@@ -407,9 +450,8 @@ function evaluateGates(cells: Map<string, CellMetrics>, runs: RunRecord[]): Gate
       detail: `deny 账本vs日志: warn ${warn.deniedFromLedger}/${warn.blockedByLedgerCalls}, block ${block.deniedFromLedger}/${block.blockedByLedgerCalls}; warn 账本vs日志: ${warn.warningsFromLedger}/${warn.warnInjections}`,
     },
   ]
-  if (preliminary) {
-    for (const gate of gates) gate.detail = `[试验轮, 非正式结论] ${gate.detail}`
-  }
+  const prefix = stage === 'formal' ? '' : stage === 'trial' ? '[试验轮, 非正式结论] ' : '[pilot, 非正式结论] '
+  for (const gate of gates) gate.detail = prefix + gate.detail
   if (maxIterations === 0) {
     return gates.map(gate => ({ name: gate.name, passed: false, detail: 'no runs collected — run benchmark/run.ts first' }))
   }
@@ -453,7 +495,8 @@ function main(): void {
       `| ${name} | ${total.iterations} | ${total.completionRate === null ? 'n/a' : pct(total.completionRate)} | ${total.repeatFailures} | ${total.wrongBlocks} | ${total.requiredAllowSatisfied}/${total.requiredAllowTotal} | ${total.crossAgentRepeats} | ${total.tokenIn}/${total.tokenOut} |`,
     )
   }
-  console.log('\n## 发布门槛\n')
+  const stage = stageOf(cells)
+  console.log(`\n## 发布门槛（阶段：${stage}）\n`)
   for (const gate of gates) {
     console.log(`${gate.passed ? 'PASS' : 'FAIL'}  ${gate.name} — ${gate.detail}`)
   }
@@ -470,6 +513,8 @@ function main(): void {
     '# 发布门槛评估',
     '',
     `生成时间：${summary.generatedAt}`,
+    '',
+    `阶段：${stage}（formal = 每格 3 轮；trial = 18 轮单次；pilot = 更少）`,
     '',
     '| 门槛 | 判定 | 说明 |',
     '|---|---|---|',

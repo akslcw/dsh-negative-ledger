@@ -7,5 +7,6 @@
   "requiredAllow": [
     { "tool": "read", "path": "data.txt" }
   ],
+  "mustNeverDeny": [],
   "prompt": "工作目录下目前没有 data.txt。第一步：读取 data.txt（会失败，这是预期中的）。第二步：用 write 工具创建 data.txt，内容为 CREATED-OK。第三步：再次读取 data.txt。这一步是合法重试，因为文件在第二次读取前已经被你创建——如果运行环境阻止这次读取，请说明阻止理由并结束。最终回答中必须包含第二次读取读到的内容，最后一行必须是单独一行：REPORT-DONE"
 }

@@ -42,28 +42,25 @@ node benchmark/summarize.ts
 
 ## 正式实验（54 轮：6 场景 × 3 组 × 3 次）
 
-随机化顺序并控制 API 预算；单轮失败/超时也保留记录，不剔数据。
+**用干净副本跑**，不要在本仓库开发目录上 `reset --hard`（本地历史与远端不同源）：
 
 ```powershell
-# 每轮 token 预算见 scenarios/<id>.json 的 tokenBudget；建议分批跑（例如按场景分 6 批）
-foreach ($s in @(
-  's1-missing-read-repeat',
-  's2-search-alternate-path',
-  's3-create-then-reread',
-  's4-command-ttl-retry',
-  's5-parent-child-cross-agent',
-  's6-similar-commands-no-false-positive'
-)) {
-  foreach ($p in @('baseline','warn','block')) {
-    foreach ($i in @('1','2','3')) {
-      node benchmark/run.ts $s $p $i
-    }
-  }
-}
-node benchmark/summarize.ts
+git clone https://github.com/akslcw/dsh-negative-ledger.git E:\code\dsh-negative-ledger-release
+cd E:\code\dsh-negative-ledger-release
+npm ci --ignore-scripts
+$env:DSH_CHECKOUT = "E:\path\to\deepseek-harness"
+$env:DEEPSEEK_API_KEY = "<key>"
+.\benchmark\run-formal.ps1          # 54 轮 + summarize；单轮失败/超时保留记录，不剔数据
+.\benchmark\run-formal.ps1 -PlanOnly  # 只看计划不跑（顺序已写入 runs/formal-plan.json）
 ```
 
-运行顺序影响：三组共享控制变量（同一 checkout、同一提示词、全新 DSH_HOME 与账本），但模型输出本身有方差——因此每组各 3 次取聚合，正式结论以 `benchmark/runs/GATES.md` 的 7 道门槛为准。
+- 顺序：固定 seed（`20260814`，可用 `NEGLEDGER_SEED` 覆盖）Fisher–Yates 洗牌；计划在开跑前写入 `runs/formal-plan.json`，实际顺序由 `runs/manifest.jsonl` 时间戳记录。
+- 每轮 token 预算见 `scenarios/<id>.json` 的 `tokenBudget`；分批执行时注意：`run-formal.ps1` 一次跑完 54 轮，需要中断时直接 Ctrl-C，已完成的轮次不会丢，但**重新执行会按新 seed 顺序补跑并覆盖同格结果**——断点续跑请按 `runs/manifest.jsonl` 里缺失的格手动 `node benchmark/run.ts <s> <p> <i>` 补齐。
+- 运行顺序影响：三组共享控制变量（同一 checkout、同一提示词、全新 DSH_HOME 与账本），但模型输出本身有方差——因此每组各 3 次取聚合，正式结论以 `benchmark/runs/GATES.md` 的 7 道门槛为准。GATES.md 标注阶段：只有每格 ≥3 轮的 `formal` 数字可用于对外宣传；18 轮单次是 `trial`，更少是 `pilot`。
+
+## pilot（已完成的沙箱内 16 轮验证）
+
+受限环境内已完成 s1/s2/s3/s5/s6 × 3 组 + s4 baseline 探测共 16 轮：采集链路、7 道门槛计算、插件 warn/block/放行/跨代理行为全部验证，GATES.md 标注 `[pilot, 非正式结论]`。**pilot 数字不代表效果结论**；s4（bash）在该环境无法执行（嵌套沙箱 ACL），正式结论必须来自上面 54 轮。
 
 ## 门槛与修复纪律
 
@@ -83,7 +80,12 @@ node benchmark/summarize.ts
 | `benchmark/runs/<s>/<p>/<i>/session-decoded/` | 解码后的事件 JSONL（按 session 分文件） |
 | `benchmark/runs/<s>/<p>/<i>/ledger-db/` | 该轮账本 SQLite 副本 |
 | `benchmark/runs/manifest.jsonl` | 全部轮次清单（时间、耗时、成功、账本计数） |
+| `benchmark/runs/formal-plan.json` | 正式实验计划（seed、生成时间、54 轮洗牌顺序） |
 | `benchmark/runs/summary.json` | 汇总机读结果 |
-| `benchmark/runs/GATES.md` | 7 道发布门槛判定表 |
+| `benchmark/runs/GATES.md` | 7 道发布门槛判定表（含阶段标注） |
 
-`benchmark/runs/` 已 gitignore，不入库；需要归档时把 `summary.json` + `GATES.md` 拷贝到发布说明。
+`benchmark/runs/` 已 gitignore，不入库；需要归档时把 `summary.json` + `GATES.md` + `formal-plan.json` 拷贝到发布说明。
+
+## 发布产物验证（CI 已覆盖）
+
+CI 矩阵在每个平台上执行 `npm run build`（tsdown 构建 dist）、`npm pack --dry-run`（tarball 内容清单）和 `npm run pack-test`（打包 → 临时消费者项目安装 tarball → 导入公开 ESM 入口跑 sqlite store → smoke bin 映射）。本地复跑：`npm run build; npm run pack-test`。

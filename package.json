@@ -39,6 +39,7 @@
     "demo": "node demos/run-demos.ts",
     "cli": "node src/cli.ts",
     "smoke": "node smoke/real-mount.ts",
+    "pack-test": "node smoke/packed-consumer.mjs",
     "prepack": "npm run build"
   },
   "keywords": [

@@ -19,7 +19,7 @@
 - 每轮全新会话：`DSH_HOME` 指向轮次专属目录。
 - 每轮全新 SQLite：ledger 目录由 overlay 模板替换为轮次专属路径。
 - 每轮超时与 token 上限：`timeoutMs` / `maxTokens` 在 scenario JSON 中声明，由 run.ts 执行（超时杀进程、token 从会话日志统计）。
-- 三组运行顺序随机化：`--order random`（默认按 profile 字典序；正式实验用随机序并记录到 runs/manifest.jsonl）。
+- 三组运行顺序随机化：`benchmark/run-formal.ps1` 用固定 seed（默认 `20260814`，可用 `NEGLEDGER_SEED` 覆盖）做 Fisher–Yates 洗牌，**计划顺序在开跑前写入 `runs/formal-plan.json`**，实际执行顺序由 `runs/manifest.jsonl` 的逐行时间戳记录；计划与实况可对账。
 
 ## 采集（每轮）
 
@@ -43,7 +43,7 @@
 ## 发布门槛（阶段 7）
 
 - Block 重复失败次数较 Baseline 降低 ≥ 70%
-- Block 错误阻止次数 = 0（判定：被 deny 的指纹在本轮内出现后续成功执行）
+- Block 错误阻止次数 = 0（双 oracle：① 场景声明的 `mustNeverDeny` 键（事后必须合法的调用）被 deny 计数 = 0；② 被 deny 的指纹在本轮内出现后续成功执行 = 0。两者都不覆盖的 deny 无法事后验证，逐条保留在 result.jsonl 的 `ledger.denies` 中作为审计数据，不计入门槛）
 - 证据变化后的合法重试放行率 = 100%（scenario JSON 的 `requiredAllow` 全部执行且成功）
 - Block 任务完成率 ≥ Baseline
 - 跨代理重复降低 ≥ 80%（子会话指纹与父会话失败指纹的交集计数）
@@ -56,8 +56,15 @@
 |---|---|
 | 重复失败调用 | 同 (tool, 规范化 args) 在一次失败后、无同指纹成功执行介于其间、且证据未变（账本组：fingerprint 命中）时再次执行 |
 | 任务完成率 | stdout 含 successMarker |
-| 错误阻止率 | 被 deny 的指纹在本轮内出现后续成功执行 ÷ 总 deny 数 |
+| 错误阻止率 | 双 oracle：mustNeverDeny 声明键被 deny 数 + 被 deny 后同指纹成功执行数 |
 | 合法重试放行率 | requiredAllow 中成功执行的比例 |
-| 跨代理重复 | 子会话中执行、且父会话已失败过的指纹计数 |
+| 跨代理重复 | 子会话（delegationDepth > 0）中执行、且父会话已失败过的指纹计数 |
 | token | session usage 事件 input/output 求和 |
 | 时间 | 末事件 − 首事件 |
+
+## 阶段判定与措辞
+
+- `pilot`：任何少于 18 轮的局部验证（例如受限环境里缺 s4 的 16 轮）——只证明采集链路与核心行为，**不作为效果结论**，GATES.md 标注 `[pilot, 非正式结论]`。
+- `trial`：协议定义的 18 轮单次试验——验证场景触发与指标可提取。
+- `formal`：每个 scenario×profile 格 ≥ 3 轮（54 轮）——唯一可作为效果结论并对外引用数字的阶段。
+- 对外宣传中的数字（如"降低 X%""错误阻止为零"）只允许来自 formal 阶段的 GATES.md。
