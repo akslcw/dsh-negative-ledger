@@ -10,7 +10,7 @@ import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { openDatabase } from '../../src/sqlite-driver.ts'
 import { SqliteLedgerStore } from '../../src/store-sqlite.ts'
-import type { AttemptDecisionResult } from '../../src/store.ts'
+import type { AttemptDecisionResult, StoreFact } from '../../src/store.ts'
 
 const phase = process.argv[2]!
 const dir = process.argv[3]!
@@ -46,11 +46,46 @@ const commandInput = (commandLine: string): { kind: 'command_failed'; scope: str
   evidence: [{ role: 'outcome', kind: 'command-exit', exitCode: 1, stderrSignature: 'x' }],
 })
 
+// Two sibling processes opening the same fresh database race on the
+// construction-time PRAGMAs (journal_mode=WAL takes a write lock) and can
+// throw a raw "database is locked" before the busy-timeout backoff exists.
+// Callers own the bounded retry: the store contract, not the sqlite driver.
+async function openWithRetry(dir: string): Promise<SqliteLedgerStore> {
+  const deadline = Date.now() + 2000
+  for (;;) {
+    try {
+      return new SqliteLedgerStore({ dir })
+    } catch (error) {
+      if (/database is locked|store-busy/.test(String(error)) && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 15 + Math.random() * 30))
+        continue
+      }
+      throw error
+    }
+  }
+}
+
 try {
   if (phase === 'a1-record') {
     const operationId = rest[0]!; const commandLine = rest[1]!
-    const store = new SqliteLedgerStore({ dir })
-    const fact = await store.recordFact(commandInput(commandLine), { operationId })
+    const store = await openWithRetry(dir)
+    // Decision-time write-lock contention surfaces as a thrown store-busy
+    // error; retrying within a bounded window mirrors the policy's backoff
+    // contract (the store itself never busy-waits beyond the sqlite timeout).
+    const deadline = Date.now() + 2000
+    let fact: StoreFact | null = null
+    for (;;) {
+      try {
+        fact = await store.recordFact(commandInput(commandLine), { operationId })
+        break
+      } catch (error) {
+        if (/store-busy|database is locked/.test(String(error)) && Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, 15 + Math.random() * 30))
+          continue
+        }
+        throw error
+      }
+    }
     report({ id: fact.fact.id, revision: fact.revision })
     await store.close()
     process.exit(0)
@@ -58,7 +93,7 @@ try {
 
   if (phase === 'a2-lease') {
     const leaseId = rest[0]!; const owner = rest[1]!; const factId = rest[2]!
-    const store = new SqliteLedgerStore({ dir })
+    const store = await openWithRetry(dir)
     await waitForGo()
     // The raw store reports write-lock contention as { kind: 'unavailable',
     // reason: 'store busy' }; retrying within a bounded window mirrors the
