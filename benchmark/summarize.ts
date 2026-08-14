@@ -34,7 +34,7 @@ interface RunRecord {
   timedOut: boolean
   exitCode: number | null
   toolCalls: ResultToolCall[]
-  policy: { warnInjections: number; blockedByLedgerCalls: number }
+  policy: { warnInjections: number; releaseInjections: number; blockedByLedgerCalls: number }
   ledger: {
     totals: { duplicateFailuresObserved: number; warningsEmitted: number; callsDenied: number }
     denies: { kind: string; fingerprint: string; count: number }[]
@@ -131,47 +131,66 @@ function failedKeysOf(calls: ResultToolCall[]): Set<string> {
   return keys
 }
 
-function requiredAllowKeys(def: ScenarioDef): { tool: string; key: string; prefix: boolean }[] {
-  return def.requiredAllow.map(entry => {
-    const key = entry.path !== undefined ? `${entry.tool}|${entry.path}` : `${entry.tool}|${entry.commandLinePrefix ?? ''}`
-    return { tool: entry.tool, key, prefix: entry.path === undefined }
-  })
+function matchesAllow(call: ResultToolCall, entry: { tool: string; path?: string; commandLinePrefix?: string }): boolean {
+  if (call.name !== entry.tool) return false
+  const args = call.args ?? {}
+  if (entry.path !== undefined) {
+    const filePath = String(args.file_path ?? args.path ?? '').replaceAll('\\', '/')
+    return filePath === entry.path || filePath.endsWith(`/${entry.path}`)
+  }
+  const command = String(args.command ?? args.cmd ?? '').trim()
+  return command.startsWith(entry.commandLinePrefix ?? '')
 }
 
 function satisfiedRequiredAllow(def: ScenarioDef, calls: ResultToolCall[]): number {
   let satisfied = 0
-  for (const want of requiredAllowKeys(def)) {
-    const failedOnce = calls.some(call => call.isError && callKey(call) === want.key)
-    const laterSuccess = ((): boolean => {
-      let failed = false
-      for (const call of calls) {
-        const key = callKey(call)
-        const matches = want.prefix ? key.startsWith(want.key) : key === want.key
-        if (!matches) continue
-        if (call.isError && !isBlocked(call)) failed = true
-        else if (failed && call.ok === true) return true
+  for (const entry of def.requiredAllow) {
+    const failedOnce = calls.some(call => call.isError && matchesAllow(call, entry))
+    let failed = false
+    let laterSuccess = false
+    for (const call of calls) {
+      if (!matchesAllow(call, entry)) continue
+      if (call.isError && !isBlocked(call)) failed = true
+      else if (failed && call.ok === true) {
+        laterSuccess = true
+        break
       }
-      return false
-    })()
+    }
     if (failedOnce && laterSuccess) satisfied += 1
   }
   return satisfied
 }
 
-function perSessionCalls(runDir: string): Map<string, ResultToolCall[]> {
+interface SessionCalls {
+  depth: number
+  calls: ResultToolCall[]
+}
+
+function perSessionCalls(runDir: string): Map<string, SessionCalls> {
   const decoded = join(runDir, 'session-decoded')
-  const map = new Map<string, ResultToolCall[]>()
+  const map = new Map<string, SessionCalls>()
   if (!existsSync(decoded)) return map
   for (const file of readdirSync(decoded)) {
     try {
       const events = JSON.parse(`[${readFileSync(join(decoded, file), 'utf8').trim().split('\n').join(',')}]`) as unknown[]
-      map.set(file, extractToolCalls(events).map(call => ({
-        name: call.name,
-        args: call.args,
-        ok: call.ok,
-        isError: call.isError,
-        errorText: call.errorText,
-      })))
+      let depth = 0
+      for (const raw of events) {
+        if (typeof raw === 'object' && raw !== null && (raw as { type?: unknown }).type === 'session') {
+          const value = (raw as { delegationDepth?: unknown }).delegationDepth
+          if (typeof value === 'number') depth = value
+          break
+        }
+      }
+      map.set(file, {
+        depth,
+        calls: extractToolCalls(events).map(call => ({
+          name: call.name,
+          args: call.args,
+          ok: call.ok,
+          isError: call.isError,
+          errorText: call.errorText,
+        })),
+      })
     } catch {
       // Skip undecodable session files.
     }
@@ -193,7 +212,7 @@ function wrongBlocksForRun(run: RunRecord, runDir: string): number {
   }
   if (deniedKeys.size === 0) return 0
   let wrong = 0
-  for (const calls of perSessionCalls(runDir).values()) {
+  for (const { calls } of perSessionCalls(runDir).values()) {
     for (const key of deniedKeys) {
       let sawDeny = false
       for (const call of calls) {
@@ -211,27 +230,26 @@ function wrongBlocksForRun(run: RunRecord, runDir: string): number {
 
 function crossAgentRepeats(runDir: string): number {
   const sessions = [...perSessionCalls(runDir).values()]
+  if (sessions.length < 2) return 0
+  const minDepth = Math.min(...sessions.map(session => session.depth))
+  const parentFailed = new Set<string>()
+  for (const session of sessions) {
+    if (session.depth !== minDepth) continue
+    for (const key of failedKeysOf(session.calls)) parentFailed.add(key)
+  }
   let repeats = 0
-  for (let i = 0; i < sessions.length; i += 1) {
-    const session = sessions[i]
-    if (session === undefined) continue
-    const failed = failedKeysOf(session)
-    if (failed.size === 0) continue
-    for (let j = 0; j < sessions.length; j += 1) {
-      if (i === j) continue
-      const other = sessions[j]
-      if (other === undefined) continue
-      for (const call of other) {
-        if (!isBlocked(call) && call.isError && failed.has(callKey(call))) repeats += 1
-      }
+  for (const session of sessions) {
+    if (session.depth === minDepth) continue
+    for (const call of session.calls) {
+      if (!isBlocked(call) && call.isError && parentFailed.has(callKey(call))) repeats += 1
     }
   }
   return repeats
 }
 
-function computeCells(): Map<string, CellMetrics> {
+function computeCells(runs: RunRecord[]): Map<string, CellMetrics> {
   const cells = new Map<string, CellMetrics>()
-  for (const run of collectRuns()) {
+  for (const run of runs) {
     const id = `${run.scenario}/${run.profile}`
     const cell = cells.get(id) ?? {
       iterations: 0,
@@ -333,7 +351,7 @@ interface Gate {
   detail: string
 }
 
-function evaluateGates(cells: Map<string, CellMetrics>): Gate[] {
+function evaluateGates(cells: Map<string, CellMetrics>, runs: RunRecord[]): Gate[] {
   const base = groupTotals(cells, 'baseline')
   const warn = groupTotals(cells, 'warn')
   const block = groupTotals(cells, 'block')
@@ -346,6 +364,11 @@ function evaluateGates(cells: Map<string, CellMetrics>): Gate[] {
 
   const consistentDenies = warn.deniedFromLedger === warn.blockedByLedgerCalls && block.deniedFromLedger === block.blockedByLedgerCalls
   const consistentWarns = warn.warningsFromLedger === warn.warnInjections
+
+  // G6 scopes to s1, the scenario whose prompt guarantees repeat pressure:
+  // other scenarios legitimately produce zero warnings.
+  const s1WarnRuns = runs.filter(run => run.scenario === 's1-missing-read-repeat' && run.profile === 'warn')
+  const s1WarnInjected = s1WarnRuns.filter(run => run.policy.warnInjections >= 1).length
 
   const gates: Gate[] = [
     {
@@ -375,8 +398,8 @@ function evaluateGates(cells: Map<string, CellMetrics>): Gate[] {
     },
     {
       name: 'G6 Warn 每轮都注入提醒',
-      passed: warn.iterations > 0 && warn.warnInjections >= warn.iterations,
-      detail: `warn injections=${warn.warnInjections} over ${warn.iterations} rounds`,
+      passed: s1WarnRuns.length > 0 && s1WarnInjected === s1WarnRuns.length,
+      detail: `s1 warn ${s1WarnInjected}/${s1WarnRuns.length} rounds injected`,
     },
     {
       name: 'G7 账本计数与会话日志一致',
@@ -413,8 +436,9 @@ function renderTable(cells: Map<string, CellMetrics>): string {
 }
 
 function main(): void {
-  const cells = computeCells()
-  const gates = evaluateGates(cells)
+  const runs = collectRuns()
+  const cells = computeCells(runs)
+  const gates = evaluateGates(cells, runs)
   const base = groupTotals(cells, 'baseline')
   const warn = groupTotals(cells, 'warn')
   const block = groupTotals(cells, 'block')

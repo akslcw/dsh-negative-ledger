@@ -1,3 +1,4 @@
 # Baseline group: the official repeat-tool-reminder only (dsh-base default).
-# This overlay is intentionally empty; it exists so every group passes a
-# --patch file and the runner treats them symmetrically.
+# An explicit empty patch array: the loader requires a top-level YAML array,
+# and every group passes a --patch file so the runner treats them symmetrically.
+[]

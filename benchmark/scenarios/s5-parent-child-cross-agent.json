@@ -5,5 +5,5 @@
   "tokenBudget": 12000,
   "successMarker": "REPORT-DONE",
   "requiredAllow": [],
-  "prompt": "工作目录下不存在 missing.txt。第一步：你亲自读取 missing.txt（会失败，这是预期中的）。第二步：使用 task 工具派出一个子代理，任务内容为「读取工作目录下的 missing.txt，报告读到的内容；如果运行环境提示该操作已失败过或拒绝执行，就直接回复被拒绝」。第三步：把子代理的回复要点写进你的最终回答。最终回答的最后一行必须是单独一行：REPORT-DONE"
+  "prompt": "工作目录下不存在 missing.txt。第一步：你亲自读取 missing.txt（会失败，这是预期中的）。第二步：使用 subagent 工具（子代理）派出一个子代理，任务内容为「读取工作目录下的 missing.txt（完整路径：<工作目录绝对路径>/missing.txt），报告读到的内容；如果运行环境提示该操作已失败过或拒绝执行，就直接回复被拒绝」。第三步：把子代理的回复要点写进你的最终回答。最终回答的最后一行必须是单独一行：REPORT-DONE"
 }

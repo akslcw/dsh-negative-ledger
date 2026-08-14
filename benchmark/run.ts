@@ -13,6 +13,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, write
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn, execFileSync } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
 import Database from 'better-sqlite3'
 import {
   decodeSessionLogFile,
@@ -55,6 +56,7 @@ interface RunResult {
   timedOut: boolean
   success: boolean
   successSource: 'stdout' | 'events' | 'none'
+  stdioMode: 'capture' | 'inherit'
   stdoutTail: string
   stderrTail: string
   harnessCommit: string
@@ -69,7 +71,7 @@ interface RunResult {
     isError: boolean
     errorText: string
   }[]
-  policy: { warnInjections: number; blockedByLedgerCalls: number; samples: string[] }
+  policy: { warnInjections: number; releaseInjections: number; blockedByLedgerCalls: number; samples: string[] }
   ledger: LedgerSnapshot
   sessionFiles: string[]
   timeoutMs: number
@@ -165,8 +167,12 @@ async function main(): Promise<void> {
   if (existsSync(seedDir)) copyTree(seedDir, workspace)
 
   const template = readFileSync(join(projectRoot, 'benchmark', 'profiles', `${profile}.patch.yml`), 'utf8')
+  const pluginUrl = pathToFileURL(join(projectRoot, 'src', 'plugin.ts')).href
   const patchPath = join(runDir, 'patch.yml')
-  writeFileSync(patchPath, template.replaceAll('__LEDGER_DIR__', ledgerDir.replaceAll('\\', '/')))
+  writeFileSync(
+    patchPath,
+    template.replaceAll('__LEDGER_DIR__', ledgerDir.replaceAll('\\', '/')).replaceAll('__PLUGIN_PATH__', pluginUrl),
+  )
 
   const binPath = process.env.DSH_BIN ?? join(checkout, 'apps', 'cli', 'lib', 'bin.js')
   if (!existsSync(binPath)) fail(`harness CLI not found at ${binPath} (build the checkout or set DSH_BIN)`)
@@ -174,19 +180,25 @@ async function main(): Promise<void> {
   const startedAt = new Date()
   const startedAtIso = startedAt.toISOString()
   console.log(`[run] ${scenarioId}/${profile}/${iteration} starting (workspace ${workspace})`)
+  // Sandboxed runners cannot capture the child's piped stdio (EPERM); with
+  // NEGLEDGER_STDIO=inherit the CLI takes the terminal directly and success
+  // is judged from decoded session events instead of captured stdout.
+  const inheritMode = process.env.NEGLEDGER_STDIO === 'inherit'
   const child = spawn(process.execPath, [binPath, '--profile', 'headless', '--patch', patchPath, scenario.prompt], {
     cwd: workspace,
     env: { ...process.env, DSH_HOME: dshHome },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: inheritMode ? 'inherit' : ['ignore', 'pipe', 'pipe'],
   })
   let stdout = ''
   let stderr = ''
-  child.stdout?.on('data', (chunk: Buffer) => {
-    if (stdout.length < 2_000_000) stdout += chunk.toString('utf8')
-  })
-  child.stderr?.on('data', (chunk: Buffer) => {
-    if (stderr.length < 2_000_000) stderr += chunk.toString('utf8')
-  })
+  if (!inheritMode) {
+    child.stdout?.on('data', (chunk: Buffer) => {
+      if (stdout.length < 2_000_000) stdout += chunk.toString('utf8')
+    })
+    child.stderr?.on('data', (chunk: Buffer) => {
+      if (stderr.length < 2_000_000) stderr += chunk.toString('utf8')
+    })
+  }
   let timedOut = false
   const timer = setTimeout(() => {
     timedOut = true
@@ -202,8 +214,7 @@ async function main(): Promise<void> {
   clearTimeout(timer)
   const endedAtIso = new Date().toISOString()
 
-  const ledgerDirCopy = join(runDir, 'ledger-db')
-  if (existsSync(ledgerDir)) cpSync(ledgerDir, ledgerDirCopy, { recursive: true })
+  // The ledger dir is generated inside the run dir, so no copy is needed.
 
   const sessionFiles = findSessionLogs(dshHome)
   const copies: string[] = []
@@ -231,17 +242,29 @@ async function main(): Promise<void> {
   const successSource: RunResult['successSource'] = stdout.includes(scenario.successMarker) ? 'stdout' : success ? 'events' : 'none'
 
   let warnInjections = 0
+  let releaseInjections = 0
   let blockedByLedgerCalls = 0
   const samples: string[] = []
   for (const event of allEvents) {
     if (typeof event !== 'object' || event === null) continue
     const record = event as { type?: unknown; data?: unknown }
     if (record.type === 'agent/inbox/spliced' && typeof record.data === 'object' && record.data !== null) {
-      const data = record.data as { source?: unknown }
-      const source = data.source
-      if (typeof source === 'object' && source !== null && (source as { plugin?: unknown }).plugin === 'negative-ledger') {
-        warnInjections += 1
-        if (samples.length < 3) samples.push(cap(JSON.stringify(data).slice(0, 400), 400))
+      const data = record.data as { inserted?: unknown }
+      const inserted = Array.isArray(data.inserted) ? data.inserted : []
+      for (const item of inserted) {
+        if (typeof item !== 'object' || item === null) continue
+        const source = (item as { source?: unknown }).source
+        if (typeof source !== 'object' || source === null || (source as { plugin?: unknown }).plugin !== 'negative-ledger') continue
+        const content = (item as { content?: unknown }).content
+        const text = Array.isArray(content)
+          ? content
+              .map(block => (typeof block === 'object' && block !== null ? (block as { text?: unknown }).text : undefined))
+              .filter((part): part is string => typeof part === 'string')
+              .join(' ')
+          : ''
+        if (text.includes('previously failed and its evidence is unchanged')) warnInjections += 1
+        else if (text.includes('no longer applies')) releaseInjections += 1
+        if (samples.length < 3) samples.push(cap(text.slice(0, 300) || JSON.stringify(item).slice(0, 300), 300))
       }
     }
   }
@@ -265,6 +288,7 @@ async function main(): Promise<void> {
     timedOut,
     success,
     successSource,
+    stdioMode: inheritMode ? 'inherit' : 'capture',
     stdoutTail: cap(stdout.slice(-4000), 4000),
     stderrTail: cap(stderr.slice(-4000), 4000),
     harnessCommit,
@@ -279,8 +303,8 @@ async function main(): Promise<void> {
       isError: call.isError,
       errorText: cap(call.errorText, 600),
     })),
-    policy: { warnInjections, blockedByLedgerCalls, samples },
-    ledger: snapshotLedger(join(ledgerDirCopy, 'ledger.db')),
+    policy: { warnInjections, releaseInjections, blockedByLedgerCalls, samples },
+    ledger: snapshotLedger(join(ledgerDir, 'ledger.db')),
     sessionFiles: copies,
     timeoutMs: scenario.timeoutMs,
     tokenBudget: scenario.tokenBudget,

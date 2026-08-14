@@ -159,24 +159,39 @@ export function extractToolCalls(events: unknown[]): ToolCallRecord[] {
         calls.set(callId, { callId, name, args, argumentsJson, time: event.time, ok: null, isError: false, errorText: '' })
       }
     } else if (event.type === 'tool/result' && event.data) {
-      const callId = String(event.data.callId ?? '')
-      const error = event.data.error
       const message = event.data.message
+      const source = isRecord(message) && isRecord(message.source) ? message.source : null
+      const callId = String(
+        event.data.callId ?? (source !== null && typeof source.callId === 'string' ? source.callId : ''),
+      )
+      const error = event.data.error
       let isError = error !== undefined && error !== null
       let errorText = ''
-      if (isRecord(message)) {
-        const content = message.content
-        if (Array.isArray(content)) {
-          for (const block of content) {
-            if (isRecord(block) && block.isError === true) {
-              isError = true
-              const text = isRecord(block.content) && typeof block.content.text === 'string' ? block.content.text : ''
-              errorText = errorText === '' ? text : errorText
+      if (isRecord(error)) {
+        for (const key of ['code', 'message', 'name']) {
+          const value = error[key]
+          if (typeof value === 'string') {
+            errorText = value
+            break
+          }
+        }
+      }
+      if (isRecord(message) && Array.isArray(message.content)) {
+        for (const block of message.content) {
+          if (isRecord(block) && block.isError === true) {
+            isError = true
+            const parts = block.content
+            if (Array.isArray(parts)) {
+              for (const part of parts) {
+                if (isRecord(part) && typeof part.text === 'string') {
+                  if (errorText === '') errorText = part.text
+                  break
+                }
+              }
             }
           }
         }
       }
-      if (isRecord(error) && typeof error.message === 'string' && errorText === '') errorText = error.message
       results.push({ callId, ok: !isError, isError, errorText })
     }
   }

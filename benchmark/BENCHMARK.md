@@ -14,6 +14,8 @@
    ```
 4. 试验/正式轮全程使用**同一个 checkout 提交**（采集器会记录 `harnessCommit` 用于对齐）。
 
+每轮生成的 patch overlay 由 run.ts 写入 `runs/<s>/<p>/<i>/patch.yml`：插件 specifier 用 `file://` URL 指向本仓库 `src/plugin.ts`，账本目录为该轮专属绝对路径（模板见 `profiles/*.patch.yml` 的 `__PLUGIN_PATH__`/`__LEDGER_DIR__` 占位符）。受限环境（如沙箱 runner 无法捕获子进程 piped stdio）设 `NEGLEDGER_STDIO=inherit`：CLI 直接接管终端，成功判定改由解码后的 session 事件完成，result 中记录 `stdioMode: inherit`。
+
 ## 试验轮（18 轮：6 场景 × 3 组 × 1 次）
 
 目的：验证场景触发稳定、指标可提取，不形成正式结论。

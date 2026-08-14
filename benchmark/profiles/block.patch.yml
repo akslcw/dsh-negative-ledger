@@ -1,11 +1,12 @@
 # Block group: official reminder off; Negative Ledger block over sqlite.
-# __LEDGER_DIR__ is replaced per run by benchmark/run.ts.
+# __PLUGIN_PATH__ and __LEDGER_DIR__ are replaced per run by benchmark/run.ts
+# (the plugin specifier becomes a file:// URL, the ledger dir an absolute path).
 - id: repeat-tool-reminder
   disabled: true
 
 - insert:
     - id: negative-ledger
-      name: ../../../../src/plugin.ts
+      name: __PLUGIN_PATH__
       config:
         backend: sqlite
         mode: block
