@@ -145,6 +145,14 @@ export function shellExitCode(text: string): number | null {
   return match === null ? null : Number(match[1])
 }
 
+/** Tool names whose results carry shell exit-code lines. */
+const SHELL_TOOLS = new Set(['pwsh', 'bash'])
+
+/** Whether a tool's result text follows the DSH shell exit-code convention. */
+export function isShellTool(name: string): boolean {
+  return SHELL_TOOLS.has(name)
+}
+
 /** A call outcome, the common shape extractToolCalls and the summarizer share. */
 export interface CallOutcome {
   name: string
@@ -255,8 +263,11 @@ export function extractToolCalls(events: unknown[]): ToolCallRecord[] {
         }
       }
       // DSH shell tools report non-zero exits as successful results whose
-      // text carries `[exit code: N]`; N !== 0 is a failed command.
-      if (!isError) {
+      // text carries `[exit code: N]`; N !== 0 is a failed command. The
+      // parse is gated on the tool name: file contents that merely contain
+      // such a line (e.g. a read) must never be treated as failures.
+      const toolName = calls.get(callId)?.name ?? ''
+      if (!isError && isShellTool(toolName)) {
         const exitCode = shellExitCode(fullText)
         if (exitCode !== null && exitCode !== 0) {
           isError = true
@@ -411,11 +422,14 @@ export function extractToolResultTexts(events: unknown[]): ToolResultText[] {
     if (structured !== null) text = structured
     // Shell tools report non-zero exits as successful results whose text
     // carries `[exit code: N]`; N !== 0 is a failed command for evidence.
-    if (!isError) {
+    // Gated on the tool name: non-shell outputs (e.g. read file contents)
+    // containing such a line are never failures.
+    const call = calls.get(callId)
+    const toolName = call?.name ?? ''
+    if (!isError && isShellTool(toolName)) {
       const exitCode = shellExitCode(text)
       if (exitCode !== null && exitCode !== 0) isError = true
     }
-    const call = calls.get(callId)
     results.push({
       tool: call?.name ?? '',
       key: call === undefined ? '' : callKey(call),

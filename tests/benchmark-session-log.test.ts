@@ -198,6 +198,43 @@ describe('benchmark shell exit-code failure recognition (real DSH format)', () =
     assert.equal(results[0]?.isError, true)
     assert.equal(evidenceSatisfied(results, { marker: 'FLAKE-OK-7K3Q', tool: 'pwsh', repeat: true }), true)
   })
+
+  it('read results whose file content contains [exit code: 1] stay successful', () => {
+    const readCall = { type: 'tool/call', data: { callId: 'rc1', name: 'read', arguments: JSON.stringify({ file_path: 'notes.txt' }) } }
+    const readResult = {
+      type: 'tool/result',
+      data: {
+        message: {
+          source: { kind: 'tool', callId: 'rc1' },
+          content: [{ type: 'tool-result', toolCallId: 'rc1', content: [{ type: 'text', text: '<path>notes.txt</path>\n<type>file</type>\n<content>\n1: [exit code: 1]\n\n(End of file - total 1 lines)\n</content>' }], isError: false }],
+        },
+        meta: { path: 'notes.txt', offset: 1, lines: [{ number: 1, text: '[exit code: 1]' }], totalLines: 1 },
+      },
+    }
+    const events = [readCall, readResult]
+    const calls = extractToolCalls(events)
+    assert.equal(calls[0]?.isError, false)
+    assert.equal(calls[0]?.ok, true)
+    const results = extractToolResultTexts(events)
+    assert.equal(results[0]?.isError, false)
+    assert.equal(evidenceSatisfied(results, { marker: '[exit code: 1]', tool: 'read' }), true)
+  })
+
+  it('bash results follow the same non-zero exit recognition', () => {
+    const bashCall = { type: 'tool/call', data: { callId: 'bc1', name: 'bash', arguments: JSON.stringify({ command: 'false' }) } }
+    const bashResult = {
+      type: 'tool/result',
+      data: {
+        message: {
+          source: { kind: 'tool', callId: 'bc1' },
+          content: [{ type: 'tool-result', toolCallId: 'bc1', content: [{ type: 'text', text: 'false\n[exit code: 2]\n' }], isError: false }],
+        },
+      },
+    }
+    const calls = extractToolCalls([bashCall, bashResult])
+    assert.equal(calls[0]?.isError, true)
+    assert.equal(calls[0]?.errorText, '[exit code: 2]')
+  })
 })
 
 describe('benchmark scenario resolution', () => {
