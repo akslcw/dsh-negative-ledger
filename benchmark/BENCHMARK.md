@@ -66,13 +66,29 @@ $env:DEEPSEEK_API_KEY = "<key>"
 
 受限环境内已完成 s1/s2/s3/s5/s6 × 3 组 + s4 baseline 探测共 16 轮：采集链路、7 道门槛计算、插件 warn/block/放行/跨代理行为全部验证，GATES.md 标注 `[pilot, 非正式结论]`。**pilot 数字不代表效果结论**。
 
-2026-08 的两个正式批次因采集器/场景缺陷整体作废、未写成 benchmark 结果（原始数据保留备审）：
+2026-08 的四个正式批次因采集器/场景缺陷整体作废、未写成 benchmark 结果（原始数据保留备审）：
 - 批次一（41/54 轮）：① 成功标记曾在全量 session 文本中搜索，模型的 reasoning 引用标记也会判成功；② 当时 s4 依赖 POSIX `sh`，在 Windows DSH（pwsh 工具）上测到的是 shell 兼容性而非插件行为。
 - 批次二（18/54 轮）：s4 的预期与插件已确定的命令重试语义不一致——命令失败默认按 `after` TTL 放行，写文件不会自动失效 `command_failed`，Block 返回 `retry condition not met` 是正确行为；且第一次失败的 pwsh 输出回显整条命令（含标记文本），旧 evidence 判定误报 `successEvidence=true`。
 - 批次三（6/54 轮）：`read` 工具的真实输出是带行号的展示文本 `1: ALT-CONTENT-42`，旧 evidence 的整行严格相等判定把 s2（以及同样依赖 read 证据的 s3/s6）的真实成功误判为失败。
 - 批次四（54/54 轮完整，但 G3=3/6）：DSH 中 `pwsh` 退出码 1 是**非错误**工具结果、文本含 `[exit code: 1]`；汇总器只认 `isError=true` 的首次失败，漏掉 s4 三次 TTL 场景的失败前置（插件本身正确放行，原始日志三条均记录失败→等待→同命令成功）。
 
-修复：成功判定（可见文本 + 独立行证据 + repeat 绑定第二次同一 call）、s4 重写为 TTL 放行场景（实验专用 1s TTL + 显式等待 + 同命令重试）、read 证据改用 DSH 结构化 `data.meta.lines[].text`（展示文本永不参与证据解析）、采集器解析 shell 的 `[exit code: N]` 并把非零退出判为命令失败（**仅限 `pwsh`/`bash` 工具**：read 的文件内容即使含该文本也不算失败；真实日志格式回归测试随附）。正式结论必须来自修复后从新目录重跑的完整 54 轮。
+修复：成功判定（可见文本 + 独立行证据 + repeat 绑定第二次同一 call）、s4 重写为 TTL 放行场景（实验专用 1s TTL + 显式等待 + 同命令重试）、read 证据改用 DSH 结构化 `data.meta.lines[].text`（展示文本永不参与证据解析）、采集器解析 shell 的 `[exit code: N]` 并把非零退出判为命令失败（**仅限 `pwsh`/`bash` 工具**：read 的文件内容即使含该文本也不算失败；真实日志格式回归测试随附）。
+
+## 正式结果（formal，2026-08-14）
+
+第五次批次（修复后从干净目录 `dsh-negative-ledger-formal-050602ed` 重跑）：**54/54 轮完成，无超时、无非零退出，G1–G7 全部 PASS。**
+
+- 环境：模型 `deepseek-v4-flash`；Harness commit `47f9438…`（GATES.md 顶部一致性检查通过，无警告）。
+- 完成率：Baseline / Warn / Block 三组均 100%。
+- G1 Block 重复失败较 Baseline 降低 ≥ 70%：**PASS** — baseline `9` → block `0`，降低 100%。
+- G2 Block 错误阻止 = 0：**PASS** — wrongBlocks `0`，denyOnMustNeverDeny `0`。
+- G3 合法重试放行率 = 100%：**PASS** — `6/6`（s3 文件证据放行 `3/3`、s4 TTL 命令重试 `3/3`，每条均有首个 `[exit code: 1]` 失败与后续同命令成功执行证据）。
+- G4 Block 完成率 ≥ Baseline：**PASS** — 100% ≥ 100%。
+- G5 跨代理重复降低 ≥ 80%：**PASS** — baseline `3` → block `0`，降低 100%。
+- G6 Warn 在重复压力轮注入提醒：**PASS**。
+- G7 账本计数与会话日志一致：**PASS**。
+
+逐轮原始数据与 `GATES.md`/`summary.json` 位于实验机 `E:\code\dsh-negative-ledger-formal-050602ed\benchmark\runs\`（gitignored，保留审计）；审计摘要见 [FORMAL-RESULTS.md](FORMAL-RESULTS.md)。
 
 ## 门槛与修复纪律
 
