@@ -19,7 +19,10 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      - run: npm ci
+      # better-sqlite3 v13 ships official prebuilds (prebuilds/<platform>.node);
+      # --ignore-scripts skips npm's implicit node-gyp rebuild so Windows
+      # runners do not need a Visual Studio toolchain to be found.
+      - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm test
       - run: npm run demo
@@ -33,7 +36,7 @@ jobs:
         with:
           node-version: 22.19.0
           cache: npm
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm test
       - run: npm run demo
