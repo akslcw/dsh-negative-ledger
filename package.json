@@ -1,0 +1,63 @@
+{
+  "name": "@akslcw/dsh-negative-ledger",
+  "version": "0.1.0",
+  "description": "Agent negative-knowledge ledger for DeepSeek Harness: records failed paths with evidence hashes and retry conditions, auto-invalidates on evidence change.",
+  "type": "module",
+  "license": "MIT",
+  "author": "akslcw",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/akslcw/dsh-negative-ledger.git"
+  },
+  "homepage": "https://github.com/akslcw/dsh-negative-ledger#readme",
+  "bugs": {
+    "url": "https://github.com/akslcw/dsh-negative-ledger/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "default": "./dist/index.mjs"
+    }
+  },
+  "bin": {
+    "dsh-negative-ledger": "./dist/bin.mjs"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README.zh.md",
+    "DESIGN.md",
+    "DESIGN-SQLITE.md"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"tests/**/*.test.ts\"",
+    "demo": "node demos/run-demos.ts",
+    "cli": "node src/cli.ts",
+    "smoke": "node smoke/real-mount.ts",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "negative-knowledge",
+    "agent-ledger",
+    "coding-agent"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3",
+    "@types/node": "^22.20.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "tsdown": "^0.22.2"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "allowImportingTsExtensions": true,
+    "types": ["node", "better-sqlite3"],
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src", "tests", "cli", "demos"]
+}
