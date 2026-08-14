@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { evidenceSatisfied, extractToolResultTexts, finalAssistantVisibleText } from '../benchmark/session-log.ts'
+import {
+  evidenceSatisfied,
+  extractToolCalls,
+  extractToolResultTexts,
+  finalAssistantVisibleText,
+  satisfiedRequiredAllow,
+} from '../benchmark/session-log.ts'
 import { resolveScenario } from '../benchmark/resolve.ts'
 import type { ScenarioSource } from '../benchmark/resolve.ts'
 
@@ -139,6 +145,58 @@ describe('benchmark read structured evidence (real DSH format)', () => {
     const results = extractToolResultTexts([toolCallEvent('c-fail', 'read'), failed])
     assert.equal(results[0]?.isError, true)
     assert.equal(evidenceSatisfied(results, { marker: 'ALT-CONTENT-42', tool: 'read' }), false)
+  })
+})
+
+describe('benchmark shell exit-code failure recognition (real DSH format)', () => {
+  // DSH shell tools report non-zero exits as successful results whose text
+  // carries `[exit code: N]`; captured from the s4 formal-round logs.
+  const command = "if (Test-Path flag.txt) { Write-Output 'FLAKE-OK-7K3Q' } else { Write-Error 'FLAKE-FAIL'; exit 1 }"
+  const failOutput = `if (Test-Path flag.txt) { Write-Output 'FLAKE-OK-7K3Q' } else { Write-Error 'FLAKE-FAIL'; exit 1 }\nFLAKE-FAIL\n[exit code: 1]\n`
+  const okOutput = `if (Test-Path flag.txt) { Write-Output 'FLAKE-OK-7K3Q' } else { Write-Error 'FLAKE-FAIL'; exit 1 }\nFLAKE-OK-7K3Q\n[exit code: 0]\n`
+
+  function pwshCallEvent(callId: string): Record<string, unknown> {
+    return { type: 'tool/call', data: { callId, name: 'pwsh', arguments: JSON.stringify({ command }) } }
+  }
+
+  function pwshResultEvent(callId: string, output: string): Record<string, unknown> {
+    return {
+      type: 'tool/result',
+      data: {
+        message: {
+          source: { kind: 'tool', callId },
+          content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: output }], isError: false }],
+        },
+      },
+    }
+  }
+
+  const ttlSequence = [pwshCallEvent('c1'), pwshResultEvent('c1', failOutput), pwshCallEvent('c2'), pwshResultEvent('c2', okOutput)]
+
+  it('recognizes [exit code: 1] as a failed command and [exit code: 0] as success', () => {
+    const calls = extractToolCalls(ttlSequence)
+    assert.equal(calls.length, 2)
+    assert.equal(calls[0]?.isError, true)
+    assert.equal(calls[0]?.ok, false)
+    assert.equal(calls[0]?.errorText, '[exit code: 1]')
+    assert.equal(calls[1]?.isError, false)
+    assert.equal(calls[1]?.ok, true)
+  })
+
+  it('counts the s4 TTL sequence as a satisfied requiredAllow entry', () => {
+    const calls = extractToolCalls(ttlSequence)
+    assert.equal(satisfiedRequiredAllow([{ tool: 'pwsh', commandLinePrefix: command }], calls), 1)
+  })
+
+  it('without the failedOnce precondition the entry is not satisfied', () => {
+    const onlySuccess = [pwshCallEvent('c1'), pwshResultEvent('c1', okOutput)]
+    assert.equal(satisfiedRequiredAllow([{ tool: 'pwsh', commandLinePrefix: command }], extractToolCalls(onlySuccess)), 0)
+  })
+
+  it('excludes the failed exit from evidence and lets the retry satisfy it', () => {
+    const results = extractToolResultTexts(ttlSequence)
+    assert.equal(results[0]?.isError, true)
+    assert.equal(evidenceSatisfied(results, { marker: 'FLAKE-OK-7K3Q', tool: 'pwsh', repeat: true }), true)
   })
 })
 

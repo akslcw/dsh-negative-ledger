@@ -70,8 +70,9 @@ $env:DEEPSEEK_API_KEY = "<key>"
 - 批次一（41/54 轮）：① 成功标记曾在全量 session 文本中搜索，模型的 reasoning 引用标记也会判成功；② 当时 s4 依赖 POSIX `sh`，在 Windows DSH（pwsh 工具）上测到的是 shell 兼容性而非插件行为。
 - 批次二（18/54 轮）：s4 的预期与插件已确定的命令重试语义不一致——命令失败默认按 `after` TTL 放行，写文件不会自动失效 `command_failed`，Block 返回 `retry condition not met` 是正确行为；且第一次失败的 pwsh 输出回显整条命令（含标记文本），旧 evidence 判定误报 `successEvidence=true`。
 - 批次三（6/54 轮）：`read` 工具的真实输出是带行号的展示文本 `1: ALT-CONTENT-42`，旧 evidence 的整行严格相等判定把 s2（以及同样依赖 read 证据的 s3/s6）的真实成功误判为失败。
+- 批次四（54/54 轮完整，但 G3=3/6）：DSH 中 `pwsh` 退出码 1 是**非错误**工具结果、文本含 `[exit code: 1]`；汇总器只认 `isError=true` 的首次失败，漏掉 s4 三次 TTL 场景的失败前置（插件本身正确放行，原始日志三条均记录失败→等待→同命令成功）。
 
-修复：成功判定（可见文本 + 独立行证据 + repeat 绑定第二次同一 call）、s4 重写为 TTL 放行场景（实验专用 1s TTL + 显式等待 + 同命令重试）、read 证据改用 DSH 结构化 `data.meta.lines[].text`（展示文本永不参与证据解析，真实格式回归测试随附）。正式结论必须来自修复后从新目录重跑的完整 54 轮。
+修复：成功判定（可见文本 + 独立行证据 + repeat 绑定第二次同一 call）、s4 重写为 TTL 放行场景（实验专用 1s TTL + 显式等待 + 同命令重试）、read 证据改用 DSH 结构化 `data.meta.lines[].text`（展示文本永不参与证据解析）、采集器解析 shell 的 `[exit code: N]` 并把非零退出判为命令失败（真实日志格式回归测试随附）。正式结论必须来自修复后从新目录重跑的完整 54 轮。
 
 ## 门槛与修复纪律
 

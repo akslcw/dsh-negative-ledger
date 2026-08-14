@@ -6,7 +6,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { callKey, extractToolCalls } from './session-log.ts'
+import { callKey, extractToolCalls, isBlocked, matchesAllow, satisfiedRequiredAllow } from './session-log.ts'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const runsRoot = join(projectRoot, 'benchmark', 'runs')
@@ -121,10 +121,6 @@ function collectRuns(): RunRecord[] {
   return runs
 }
 
-function isBlocked(call: ResultToolCall): boolean {
-  return call.isError && call.errorText.includes('blocked by negative-ledger')
-}
-
 function repeatFailuresIn(calls: ResultToolCall[]): number {
   const last = new Map<string, boolean>()
   let repeats = 0
@@ -143,36 +139,6 @@ function failedKeysOf(calls: ResultToolCall[]): Set<string> {
     if (call.isError && !isBlocked(call)) keys.add(callKey(call))
   }
   return keys
-}
-
-function matchesAllow(call: ResultToolCall, entry: { tool: string; path?: string; commandLinePrefix?: string }): boolean {
-  if (call.name !== entry.tool) return false
-  const args = call.args ?? {}
-  if (entry.path !== undefined) {
-    const filePath = String(args.file_path ?? args.path ?? '').replaceAll('\\', '/')
-    return filePath === entry.path || filePath.endsWith(`/${entry.path}`)
-  }
-  const command = String(args.command ?? args.cmd ?? '').trim()
-  return command.startsWith(entry.commandLinePrefix ?? '')
-}
-
-function satisfiedRequiredAllow(def: ScenarioDef, calls: ResultToolCall[]): number {
-  let satisfied = 0
-  for (const entry of def.requiredAllow) {
-    const failedOnce = calls.some(call => call.isError && matchesAllow(call, entry))
-    let failed = false
-    let laterSuccess = false
-    for (const call of calls) {
-      if (!matchesAllow(call, entry)) continue
-      if (call.isError && !isBlocked(call)) failed = true
-      else if (failed && call.ok === true) {
-        laterSuccess = true
-        break
-      }
-    }
-    if (failedOnce && laterSuccess) satisfied += 1
-  }
-  return satisfied
 }
 
 interface SessionCalls {
@@ -318,7 +284,7 @@ function computeCells(runs: RunRecord[]): Map<string, CellMetrics> {
     cell.crossAgentRepeats += crossAgentRepeats(runDir)
     const def = resolvedDef(run)
     cell.denyOnMustNeverDeny += denyViolations(run, def)
-    cell.requiredAllowSatisfied += satisfiedRequiredAllow(def, run.toolCalls)
+    cell.requiredAllowSatisfied += satisfiedRequiredAllow(def.requiredAllow, run.toolCalls)
     cell.requiredAllowTotal += def.requiredAllow.length
     cell.warnInjections += run.policy.warnInjections
     cell.blockedByLedgerCalls += run.policy.blockedByLedgerCalls

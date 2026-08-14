@@ -4,6 +4,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { basename, join, relative } from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
+import type { AllowEntry } from './resolve.ts'
 
 const ZSTD_MAGIC = 0xfd2fb528
 
@@ -136,6 +137,64 @@ export function callKey(call: Pick<ToolCallRecord, 'name' | 'args'>): string {
   return `${call.name}|${JSON.stringify(args)}`
 }
 
+const SHELL_EXIT_RE = /\[exit code:\s*(\d+)\]/i
+
+/** Exit code rendered by DSH shell tools in result text, or null. */
+export function shellExitCode(text: string): number | null {
+  const match = SHELL_EXIT_RE.exec(text)
+  return match === null ? null : Number(match[1])
+}
+
+/** A call outcome, the common shape extractToolCalls and the summarizer share. */
+export interface CallOutcome {
+  name: string
+  args: Record<string, unknown> | null
+  ok: boolean | null
+  isError: boolean
+  errorText: string
+}
+
+/** Whether a failed call was denied by the negative-ledger policy. */
+export function isBlocked(call: Pick<CallOutcome, 'isError' | 'errorText'>): boolean {
+  return call.isError && call.errorText.includes('blocked by negative-ledger')
+}
+
+/** Whether a call matches a scenario's declared allow/never-deny entry. */
+export function matchesAllow(call: Pick<CallOutcome, 'name' | 'args'>, entry: AllowEntry): boolean {
+  if (call.name !== entry.tool) return false
+  const args = call.args ?? {}
+  if (entry.path !== undefined) {
+    const filePath = String(args.file_path ?? args.path ?? '').replaceAll('\\', '/')
+    return filePath === entry.path || filePath.endsWith(`/${entry.path}`)
+  }
+  const command = String(args.command ?? args.cmd ?? '').trim()
+  return command.startsWith(entry.commandLinePrefix ?? '')
+}
+
+/**
+ * Count how many declared allow entries are satisfied: the call failed at
+ * least once (a non-blocked failure), and a later call with the same
+ * declaration succeeded.
+ */
+export function satisfiedRequiredAllow(requiredAllow: AllowEntry[], calls: CallOutcome[]): number {
+  let satisfied = 0
+  for (const entry of requiredAllow) {
+    const failedOnce = calls.some(call => call.isError && matchesAllow(call, entry))
+    let failed = false
+    let laterSuccess = false
+    for (const call of calls) {
+      if (!matchesAllow(call, entry)) continue
+      if (call.isError && !isBlocked(call)) failed = true
+      else if (failed && call.ok === true) {
+        laterSuccess = true
+        break
+      }
+    }
+    if (failedOnce && laterSuccess) satisfied += 1
+  }
+  return satisfied
+}
+
 /** Extract tool/call + tool/result pairs from decoded session events. */
 export function extractToolCalls(events: unknown[]): ToolCallRecord[] {
   const calls = new Map<string, ToolCallRecord>()
@@ -176,20 +235,32 @@ export function extractToolCalls(events: unknown[]): ToolCallRecord[] {
           }
         }
       }
+      let fullText = ''
       if (isRecord(message) && Array.isArray(message.content)) {
         for (const block of message.content) {
-          if (isRecord(block) && block.isError === true) {
+          if (!isRecord(block) || !Array.isArray(block.content)) continue
+          if (block.isError === true) {
             isError = true
-            const parts = block.content
-            if (Array.isArray(parts)) {
-              for (const part of parts) {
-                if (isRecord(part) && typeof part.text === 'string') {
-                  if (errorText === '') errorText = part.text
-                  break
-                }
+            for (const part of block.content) {
+              if (isRecord(part) && typeof part.text === 'string') {
+                fullText += `${part.text}\n`
+                if (errorText === '') errorText = part.text
               }
             }
+          } else {
+            for (const part of block.content) {
+              if (isRecord(part) && typeof part.text === 'string') fullText += `${part.text}\n`
+            }
           }
+        }
+      }
+      // DSH shell tools report non-zero exits as successful results whose
+      // text carries `[exit code: N]`; N !== 0 is a failed command.
+      if (!isError) {
+        const exitCode = shellExitCode(fullText)
+        if (exitCode !== null && exitCode !== 0) {
+          isError = true
+          errorText = `[exit code: ${exitCode}]`
         }
       }
       results.push({ callId, ok: !isError, isError, errorText })
@@ -338,6 +409,12 @@ export function extractToolResultTexts(events: unknown[]): ToolResultText[] {
       }
     }
     if (structured !== null) text = structured
+    // Shell tools report non-zero exits as successful results whose text
+    // carries `[exit code: N]`; N !== 0 is a failed command for evidence.
+    if (!isError) {
+      const exitCode = shellExitCode(text)
+      if (exitCode !== null && exitCode !== 0) isError = true
+    }
     const call = calls.get(callId)
     results.push({
       tool: call?.name ?? '',
