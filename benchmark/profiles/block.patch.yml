@@ -11,3 +11,6 @@
         backend: sqlite
         mode: block
         dir: __LEDGER_DIR__
+        # Experiment-only: 1s TTL so s4 exercises the command-retry release
+        # window inside one session (the production default is unchanged).
+        commandRetryAfterMs: 1000

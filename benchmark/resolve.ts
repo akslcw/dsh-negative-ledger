@@ -12,7 +12,7 @@ export interface AllowEntry {
 
 export interface SuccessSpec {
   report: string
-  evidence?: { marker: string; tool?: string }
+  evidence?: { marker: string; tool?: string; repeat?: boolean }
 }
 
 export interface ScenarioSource {
@@ -24,6 +24,7 @@ export interface ScenarioSource {
   requiredAllow: AllowEntry[]
   mustNeverDeny: AllowEntry[]
   command?: { windows: string; posix: string }
+  sleep?: { windows: string; posix: string }
   prompt: string
 }
 
@@ -37,6 +38,7 @@ export interface ResolvedScenario {
   mustNeverDeny: AllowEntry[]
   shellTool: 'pwsh' | 'bash' | null
   command: string | null
+  sleep: string | null
   prompt: string
 }
 
@@ -62,14 +64,20 @@ function resolveEntry(entry: AllowEntry, shellTool: string, command: string | nu
 export function resolveScenario(def: ScenarioSource, platform: NodeJS.Platform): ResolvedScenario {
   const shellTool = def.command !== undefined ? shellToolFor(platform) : null
   const command = def.command !== undefined ? (platform === 'win32' ? def.command.windows : def.command.posix) : null
-  const prompt = command !== null ? def.prompt.replaceAll('__SHELL_COMMAND__', command) : def.prompt
+  const sleep = def.sleep !== undefined ? (platform === 'win32' ? def.sleep.windows : def.sleep.posix) : null
+  let prompt = def.prompt
+  if (command !== null) prompt = prompt.replaceAll('__SHELL_COMMAND__', command)
+  if (sleep !== null) prompt = prompt.replaceAll('__SLEEP_COMMAND__', sleep)
   const sourceEvidence = def.success.evidence
   let success: SuccessSpec = { report: def.success.report }
   if (sourceEvidence !== undefined) {
     const evidenceTool = sourceEvidence.tool === '__SHELL__' ? shellTool : sourceEvidence.tool
-    success = evidenceTool === null || evidenceTool === undefined
-      ? { report: def.success.report, evidence: { marker: sourceEvidence.marker } }
-      : { report: def.success.report, evidence: { marker: sourceEvidence.marker, tool: evidenceTool } }
+    const evidence: SuccessSpec['evidence'] = {
+      marker: sourceEvidence.marker,
+      ...(evidenceTool !== null && evidenceTool !== undefined ? { tool: evidenceTool } : {}),
+      ...(sourceEvidence.repeat === true ? { repeat: true } : {}),
+    }
+    success = { report: def.success.report, evidence }
   }
   return {
     id: def.id,
@@ -81,6 +89,7 @@ export function resolveScenario(def: ScenarioSource, platform: NodeJS.Platform):
     mustNeverDeny: def.mustNeverDeny.map(entry => resolveEntry(entry, shellTool ?? '', command)),
     shellTool,
     command,
+    sleep,
     prompt,
   }
 }

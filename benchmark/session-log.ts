@@ -276,24 +276,37 @@ export function finalAssistantVisibleText(events: unknown[]): string {
 /** Text output of one tool/result event, joined from its content blocks. */
 export interface ToolResultText {
   tool: string
+  /** callKey of the matching tool/call ('' when the call event is missing). */
+  key: string
   text: string
   isError: boolean
 }
 
 /**
- * Tool-output evidence: for every tool/result event, the tool name (joined
- * from the matching tool/call) and the text the tool actually produced.
- * Marker checks for evidence must use these texts — never assistant text.
+ * Tool-output evidence: for every tool/result event, the tool name and call
+ * key (joined from the matching tool/call) and the text the tool actually
+ * produced. Marker checks for evidence must use these texts — never
+ * assistant text.
  */
 export function extractToolResultTexts(events: unknown[]): ToolResultText[] {
-  const names = new Map<string, string>()
+  const calls = new Map<string, { name: string; args: Record<string, unknown> | null }>()
   const results: ToolResultText[] = []
   for (const raw of events) {
     const event = asEvent(raw)
     if (event === null || event.data === undefined) continue
     if (event.type === 'tool/call') {
       const callId = String(event.data.callId ?? '')
-      if (callId !== '') names.set(callId, String(event.data.name ?? ''))
+      if (callId === '') continue
+      const argumentsJson = typeof event.data.arguments === 'string' ? event.data.arguments : null
+      let args: Record<string, unknown> | null = null
+      if (argumentsJson !== null) {
+        try {
+          args = JSON.parse(argumentsJson) as Record<string, unknown>
+        } catch {
+          args = null
+        }
+      }
+      calls.set(callId, { name: String(event.data.name ?? ''), args })
       continue
     }
     if (event.type !== 'tool/result') continue
@@ -312,9 +325,44 @@ export function extractToolResultTexts(events: unknown[]): ToolResultText[] {
         }
       }
     }
-    results.push({ tool: names.get(callId) ?? '', text, isError })
+    const call = calls.get(callId)
+    results.push({
+      tool: call?.name ?? '',
+      key: call === undefined ? '' : callKey(call),
+      text,
+      isError,
+    })
   }
   return results
+}
+
+/**
+ * Evidence verdict. The marker must match a standalone output line (trimmed
+ * equality — command echoes that merely contain the marker inside a longer
+ * line do not count), the producing result must be non-error, and with
+ * `repeat: true` the producing call must be a repeat: an earlier tool result
+ * with the same call key must exist in the session.
+ */
+export function evidenceSatisfied(
+  results: ToolResultText[],
+  spec: { marker: string; tool?: string; repeat?: boolean },
+): boolean {
+  const seen = new Set<string>()
+  for (const result of results) {
+    const known = result.key !== '' && result.tool !== ''
+    const lineMatch = result.text.split('\n').some(line => line.trim() === spec.marker)
+    const matchesTool = spec.tool === undefined || result.tool === spec.tool
+    if (!lineMatch || !matchesTool || result.isError) {
+      if (known) seen.add(result.key)
+      continue
+    }
+    if (spec.repeat === true && !seen.has(result.key)) {
+      if (known) seen.add(result.key)
+      continue
+    }
+    return true
+  }
+  return false
 }
 
 /** Relative path (forward slashes) used in collected artifacts. */

@@ -5,7 +5,7 @@
   "tokenBudget": 8000,
   "success": {
     "report": "REPORT-DONE",
-    "evidence": { "marker": "CREATED-OK", "tool": "read" }
+    "evidence": { "marker": "CREATED-OK", "tool": "read", "repeat": true }
   },
   "requiredAllow": [
     { "tool": "read", "path": "data.txt" }

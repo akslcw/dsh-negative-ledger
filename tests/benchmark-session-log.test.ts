@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { extractToolResultTexts, finalAssistantVisibleText } from '../benchmark/session-log.ts'
+import { evidenceSatisfied, extractToolResultTexts, finalAssistantVisibleText } from '../benchmark/session-log.ts'
 import { resolveScenario } from '../benchmark/resolve.ts'
 import type { ScenarioSource } from '../benchmark/resolve.ts'
 
@@ -58,34 +58,62 @@ describe('benchmark success extraction', () => {
   })
 })
 
+describe('benchmark evidence verdict', () => {
+  it('standalone-line matching rejects command echoes that merely contain the marker', () => {
+    const echo = { tool: 'pwsh', key: 'cmd-key', text: "if (Test-Path flag.txt) { Write-Output 'FLAKE-OK-7K3Q' } ...\nFLAKE-FAIL\n", isError: false }
+    assert.equal(evidenceSatisfied([echo], { marker: 'FLAKE-OK-7K3Q', tool: 'pwsh', repeat: true }), false)
+  })
+
+  it('repeat: true binds evidence to the second occurrence of the same call key', () => {
+    const first = { tool: 'pwsh', key: 'cmd-key', text: 'FLAKE-FAIL\n', isError: false }
+    const second = { tool: 'pwsh', key: 'cmd-key', text: 'FLAKE-OK-7K3Q\n', isError: false }
+    assert.equal(evidenceSatisfied([first, second], { marker: 'FLAKE-OK-7K3Q', tool: 'pwsh', repeat: true }), true)
+    assert.equal(evidenceSatisfied([second], { marker: 'FLAKE-OK-7K3Q', tool: 'pwsh', repeat: true }), false)
+  })
+
+  it('error results never satisfy evidence even on a standalone line', () => {
+    const failed = { tool: 'read', key: 'r-key', text: 'CREATED-OK\n', isError: true }
+    assert.equal(evidenceSatisfied([failed], { marker: 'CREATED-OK', tool: 'read' }), false)
+  })
+
+  it('unrelated keys do not satisfy a repeat requirement', () => {
+    const other = { tool: 'read', key: 'other-key', text: 'AAA-STABLE\n', isError: false }
+    assert.equal(evidenceSatisfied([other], { marker: 'AAA-STABLE', tool: 'read', repeat: true }), false)
+  })
+})
+
 describe('benchmark scenario resolution', () => {
   const source: ScenarioSource = {
     id: 's4-test',
     title: 't',
     timeoutMs: 1,
     tokenBudget: 1,
-    success: { report: 'REPORT-DONE', evidence: { marker: 'FLAKE-OK-7K3Q', tool: '__SHELL__' } },
+    success: { report: 'REPORT-DONE', evidence: { marker: 'FLAKE-OK-7K3Q', tool: '__SHELL__', repeat: true } },
     requiredAllow: [{ tool: '__SHELL__', commandLinePrefix: '__SHELL_COMMAND__' }],
     mustNeverDeny: [],
     command: { windows: 'W-CMD', posix: 'P-CMD' },
-    prompt: 'run: __SHELL_COMMAND__',
+    sleep: { windows: 'W-SLEEP', posix: 'P-SLEEP' },
+    prompt: 'run: __SHELL_COMMAND__ then __SLEEP_COMMAND__',
   }
 
-  it('resolves pwsh + windows command on win32', () => {
+  it('resolves pwsh + windows command + sleep on win32', () => {
     const resolved = resolveScenario(source, 'win32')
     assert.equal(resolved.shellTool, 'pwsh')
     assert.equal(resolved.command, 'W-CMD')
-    assert.equal(resolved.prompt, 'run: W-CMD')
+    assert.equal(resolved.sleep, 'W-SLEEP')
+    assert.equal(resolved.prompt, 'run: W-CMD then W-SLEEP')
     assert.equal(resolved.success.evidence?.tool, 'pwsh')
+    assert.equal(resolved.success.evidence?.repeat, true)
     assert.equal(resolved.requiredAllow[0]?.tool, 'pwsh')
     assert.equal(resolved.requiredAllow[0]?.commandLinePrefix, 'W-CMD')
   })
 
-  it('resolves bash + posix command elsewhere', () => {
+  it('resolves bash + posix command + sleep elsewhere', () => {
     const resolved = resolveScenario(source, 'linux')
     assert.equal(resolved.shellTool, 'bash')
     assert.equal(resolved.command, 'P-CMD')
-    assert.equal(resolved.prompt, 'run: P-CMD')
+    assert.equal(resolved.sleep, 'P-SLEEP')
+    assert.equal(resolved.prompt, 'run: P-CMD then P-SLEEP')
     assert.equal(resolved.success.evidence?.tool, 'bash')
     assert.equal(resolved.requiredAllow[0]?.tool, 'bash')
     assert.equal(resolved.requiredAllow[0]?.commandLinePrefix, 'P-CMD')
@@ -105,6 +133,7 @@ describe('benchmark scenario resolution', () => {
     const resolved = resolveScenario(plain, 'win32')
     assert.equal(resolved.shellTool, null)
     assert.equal(resolved.command, null)
+    assert.equal(resolved.sleep, null)
     assert.equal(resolved.prompt, 'plain')
   })
 })

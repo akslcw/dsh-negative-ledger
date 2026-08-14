@@ -36,10 +36,11 @@ node benchmark/summarize.ts
 检查要点：
 
 - 每轮产物 `benchmark/runs/<scenario>/<profile>/<iter>/` 下有 `result.jsonl`、`session-logs/`、`session-decoded/`、`ledger-db/`（warn/block 组）、`scenario-resolved.json`（平台解析后的场景）。
-- 成功判定是双条件：`report` 标记必须在**最终 assistant 可见文本**（reasoning 不算），声明 `evidence` 的场景还必须出现在**对应工具的非 error 输出**里；`result.jsonl` 的 `successReport`/`successEvidence` 两个布尔可直接核对。
+- 成功判定是双条件：`report` 标记必须在**最终 assistant 可见文本**（reasoning 不算），声明 `evidence` 的场景还必须以**独立输出行**出现在**对应工具的非 error 输出**里，且 `repeat: true` 时要求来自**第二次同一 call key**（同工具同参数）——命令回显里夹带标记的长行不算、第一次调用不算；`result.jsonl` 的 `successReport`/`successEvidence` 两个布尔可直接核对。
 - Baseline 的 s1 应产生 ≥2 次重复失败（模型可能不听话，看 stdout 与工具序列核对）。
-- Block 的 s3/s4 必须出现「先失败 → 证据变化 → 重试成功」；若模型不按脚本走（例如直接 write 不先 read），先修提示词，**不改插件**。
-- s4 是平台自适应的：Windows 用 `pwsh` 工具执行 PowerShell 命令，Linux/macOS 用 `bash` 工具执行 POSIX 命令（见 `scenarios/s4-command-ttl-retry.json` 的 `command` 字段，由 run.ts 按 `process.platform` 解析）；第一步与第三步必须是**完全相同**的命令串。
+- Block 的 s3/s4 必须出现「先失败 → 合法重试成功」；若模型不按脚本走（例如直接 write 不先 read），先修提示词，**不改插件**。
+- **s3 与 s4 测两种不同的放行机制，不要混**：s3 测**文件证据**（write 触发 fs/observed 失效 → 重读放行）；s4 测**命令 TTL**（warn/block overlay 设 `commandRetryAfterMs: 1000`，首次命令失败 → 执行 `__SLEEP_COMMAND__` 等待超过 TTL → 创建 flag.txt → 执行**完全相同**的命令 → 因 TTL 到期放行，而不是伪装成文件写入自动失效）。
+- s4 是平台自适应的：Windows 用 `pwsh` 工具执行 PowerShell 命令，Linux/macOS 用 `bash` 工具执行 POSIX 命令（见 `scenarios/s4-command-ttl-retry.json` 的 `command`/`sleep` 字段，由 run.ts 按 `process.platform` 解析）；第一步与第四步必须是**完全相同**的命令串。
 - 采集器问题（崩溃、字段缺失、解码失败）修 `benchmark/*.ts` 后重跑受影响轮次。
 
 ## 正式实验（54 轮：6 场景 × 3 组 × 3 次）
@@ -65,7 +66,11 @@ $env:DEEPSEEK_API_KEY = "<key>"
 
 受限环境内已完成 s1/s2/s3/s5/s6 × 3 组 + s4 baseline 探测共 16 轮：采集链路、7 道门槛计算、插件 warn/block/放行/跨代理行为全部验证，GATES.md 标注 `[pilot, 非正式结论]`。**pilot 数字不代表效果结论**。
 
-2026-08 的一次正式批次（41/54 轮）因两处采集器缺陷整体作废、未写成 benchmark 结果：① 成功标记曾在全量 session 文本中搜索，模型的 reasoning 引用标记也会判成功；② 当时 s4 依赖 POSIX `sh`，在 Windows DSH（pwsh 工具）上测到的是 shell 兼容性而非插件行为。两处均已修复（双条件成功判定 + s4 平台自适应），原始数据保留备审，正式结论必须来自修复后从新目录重跑的完整 54 轮。
+2026-08 的两个正式批次因采集器/场景缺陷整体作废、未写成 benchmark 结果（原始数据保留备审）：
+- 批次一（41/54 轮）：① 成功标记曾在全量 session 文本中搜索，模型的 reasoning 引用标记也会判成功；② 当时 s4 依赖 POSIX `sh`，在 Windows DSH（pwsh 工具）上测到的是 shell 兼容性而非插件行为。
+- 批次二（18/54 轮）：s4 的预期与插件已确定的命令重试语义不一致——命令失败默认按 `after` TTL 放行，写文件不会自动失效 `command_failed`，Block 返回 `retry condition not met` 是正确行为；且第一次失败的 pwsh 输出回显整条命令（含标记文本），旧 evidence 判定误报 `successEvidence=true`。
+
+两处均已修复：成功判定（可见文本 + 独立行证据 + repeat 绑定第二次同一 call）与 s4 重写为 TTL 放行场景（实验专用 1s TTL + 显式等待 + 同命令重试）。正式结论必须来自修复后从新目录重跑的完整 54 轮。
 
 ## 门槛与修复纪律
 

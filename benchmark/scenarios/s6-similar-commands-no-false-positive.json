@@ -5,7 +5,7 @@
   "tokenBudget": 8000,
   "success": {
     "report": "REPORT-DONE",
-    "evidence": { "marker": "AAA-STABLE", "tool": "read" }
+    "evidence": { "marker": "AAA-STABLE", "tool": "read", "repeat": true }
   },
   "requiredAllow": [],
   "mustNeverDeny": [

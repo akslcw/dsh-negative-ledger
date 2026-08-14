@@ -10,6 +10,8 @@
 | Warn | 关闭官方 reminder；Negative Ledger `backend: sqlite, mode: warn` | `profiles/warn.patch.yml` |
 | Block | 关闭官方 reminder；Negative Ledger `backend: sqlite, mode: block` | `profiles/block.patch.yml` |
 
+Warn/Block overlay 携带实验专用 `commandRetryAfterMs: 1000`（1 秒 TTL，仅为了让 s4 在单会话内走完"失败 → TTL 到期 → 放行"；插件生产默认值不变，s1–s3/s5/s6 不涉及命令重试，不受影响）。
+
 ## 统一控制变量
 
 - 同一 DSH 版本与 commit：`git -C $DSH_CHECKOUT rev-parse HEAD` 记录在每轮 metadata。
@@ -30,7 +32,7 @@
 - deny/warn 事件（inbox-spliced 的 negative-ledger 通知 + 账本计数）
 - token 用量（session usage 事件求和）
 - 开始/结束时间（首/末事件时间戳）
-- 任务成功判定：`success` 双条件——① `report` 标记必须出现在**最终 assistant 消息的可见文本**里（reasoning/thinking 块一律排除，模型"我知道标记会是 X"不算成功）；② 场景声明 `evidence` 时，标记必须出现在**对应工具的 result 输出**里（非 error 结果、可限定工具名）。任一缺失即 FAIL，并记录 `successSource`（full/report-only/evidence-only/none）与 `successReport`/`successEvidence` 两个布尔。
+- 任务成功判定：`success` 双条件——① `report` 标记必须出现在**最终 assistant 消息的可见文本**里（reasoning/thinking 块一律排除，模型"我知道标记会是 X"不算成功）；② 场景声明 `evidence` 时，标记必须以**独立输出行**（trim 后整行相等）出现在对应工具的 result 输出里，且该结果非 error、`repeat: true` 时还必须来自**第二次同一 call key**（同工具同参数）的调用——命令回显里夹带标记的长行不算，第一次调用的输出不算。任一缺失即 FAIL，并记录 `successSource`（full/report-only/evidence-only/none）与 `successReport`/`successEvidence` 两个布尔。
 
 ## 试验轮（阶段 5）
 
@@ -44,7 +46,7 @@
 
 - Block 重复失败次数较 Baseline 降低 ≥ 70%
 - Block 错误阻止次数 = 0（双 oracle：① 场景声明的 `mustNeverDeny` 键（事后必须合法的调用）被 deny 计数 = 0；② 被 deny 的指纹在本轮内出现后续成功执行 = 0。两者都不覆盖的 deny 无法事后验证，逐条保留在 result.jsonl 的 `ledger.denies` 中作为审计数据，不计入门槛）
-- 证据变化后的合法重试放行率 = 100%（scenario JSON 的 `requiredAllow` 全部执行且成功）
+- 证据变化后的合法重试放行率 = 100%（scenario JSON 的 `requiredAllow` 全部执行且成功；s3 测**文件证据**（write→fs/observed 失效→放行），s4 测**命令 TTL**（等待超过 `commandRetryAfterMs` 后同命令放行）——两种放行机制分开测，不混为一个测试）
 - Block 任务完成率 ≥ Baseline
 - 跨代理重复降低 ≥ 80%（子会话指纹与父会话失败指纹的交集计数）
 - Warn 向模型注入提醒：**条件蕴含**——s1（提醒压力场景）的 warn 轮中，凡实际出现 ≥2 次同指纹失败调用的轮次，必须存在 negative-ledger inbox 注入；模型未重复的轮次豁免（前置条件不存在，无法触发也不计 FAIL）

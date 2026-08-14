@@ -17,6 +17,7 @@ import { pathToFileURL } from 'node:url'
 import Database from 'better-sqlite3'
 import {
   decodeSessionLogFile,
+  evidenceSatisfied,
   extractToolCalls,
   extractToolResultTexts,
   extractUsage,
@@ -241,11 +242,7 @@ async function main(): Promise<void> {
   const finalText = finalAssistantVisibleText(allEvents)
   const reportOk = finalText.includes(scenario.success.report)
   const evidence = scenario.success.evidence
-  const evidenceOk = evidence === undefined
-    ? true
-    : extractToolResultTexts(allEvents).some(
-        result => !result.isError && (evidence.tool === undefined || result.tool === evidence.tool) && result.text.includes(evidence.marker),
-      )
+  const evidenceOk = evidence === undefined ? true : evidenceSatisfied(extractToolResultTexts(allEvents), evidence)
   const success = reportOk && evidenceOk
   const successSource: RunResult['successSource'] = success ? 'full' : reportOk ? 'report-only' : evidenceOk ? 'evidence-only' : 'none'
 
