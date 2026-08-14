@@ -31,6 +31,12 @@
 - 「并发代理事务一致」由 M4 双进程验收测试（确定性，CI 矩阵 7/7）单独背书，G5 为行为补充。
 - 前四批次（41/18/6/54 轮）已整体作废并保留原始数据，未混入任何统计。
 
+## 发布记录
+
+- npm：`@akslcw/dsh-negative-ledger@0.1.0` 已发布（latest）；GitHub Release：[v0.1.0](https://github.com/akslcw/dsh-negative-ledger/releases/tag/v0.1.0)（锚定 `050602ed`）。
+- 任何再发布必须升版本至 `0.1.1` 及以上：npm 不允许覆盖已发布的 `0.1.0`。
+- 源码 `package.json` 的 bin 路径已按 npm 发布期归一化对齐（`dist/bin.mjs`），下一次发布不再产生 `script name was cleaned` 警告。
+
 ## 复算方式
 
 ```powershell

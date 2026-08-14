@@ -76,19 +76,33 @@ $env:DEEPSEEK_API_KEY = "<key>"
 
 ## 正式结果（formal，2026-08-14）
 
-第五次批次（修复后从干净目录 `dsh-negative-ledger-formal-050602ed` 重跑）：**54/54 轮完成，无超时、无非零退出，G1–G7 全部 PASS。**
+第五次批次（修复后从干净目录 `dsh-negative-ledger-formal-050602ed` 重跑）：**54/54 轮完成，无超时、无非零退出，G1–G7 全部 PASS。** 以下为实验机生成的 `GATES.md` 摘要转录；逐轮原始数据保留在实验目录审计。
 
-- 环境：模型 `deepseek-v4-flash`；Harness commit `47f9438…`（GATES.md 顶部一致性检查通过，无警告）。
-- 完成率：Baseline / Warn / Block 三组均 100%。
-- G1 Block 重复失败较 Baseline 降低 ≥ 70%：**PASS** — baseline `9` → block `0`，降低 100%。
-- G2 Block 错误阻止 = 0：**PASS** — wrongBlocks `0`，denyOnMustNeverDeny `0`。
-- G3 合法重试放行率 = 100%：**PASS** — `6/6`（s3 文件证据放行 `3/3`、s4 TTL 命令重试 `3/3`，每条均有首个 `[exit code: 1]` 失败与后续同命令成功执行证据）。
-- G4 Block 完成率 ≥ Baseline：**PASS** — 100% ≥ 100%。
-- G5 跨代理重复降低 ≥ 80%：**PASS** — baseline `3` → block `0`，降低 100%。
-- G6 Warn 在重复压力轮注入提醒：**PASS**。
-- G7 账本计数与会话日志一致：**PASS**。
+### 门槛表（GATES.md 转录）
 
-逐轮原始数据与 `GATES.md`/`summary.json` 位于实验机 `E:\code\dsh-negative-ledger-formal-050602ed\benchmark\runs\`（gitignored，保留审计）；审计摘要见 [FORMAL-RESULTS.md](FORMAL-RESULTS.md)。
+| 门槛 | 判定 | 数据 |
+|---|---|---|
+| G1 Block 重复失败较 Baseline 降低 ≥ 70% | PASS | baseline `9` → block `0`，降低 100% |
+| G2 Block 错误阻止 = 0 | PASS | wrongBlocks `0`；denyOnMustNeverDeny `0` |
+| G3 证据变化/TTL 后合法重试放行率 = 100% | PASS | `6/6`：s3 文件证据 `3/3`、s4 TTL `3/3`，每条均有首个 `[exit code: 1]` 与后续同命令成功执行证据 |
+| G4 Block 完成率 ≥ Baseline | PASS | 100% ≥ 100% |
+| G5 跨代理重复降低 ≥ 80% | PASS | baseline `3` → block `0`，降低 100% |
+| G6 Warn 在重复压力轮注入提醒 | PASS | 全部重复压力轮注入 |
+| G7 账本计数与会话日志一致 | PASS | deny/warn 账本计数与日志派生完全一致 |
+
+### 分组指标（GATES.md 转录）
+
+| 组 | 轮次 | 完成率 | 重复失败 | 错误阻止 | 放行 | 跨代理 |
+|---|---|---|---|---|---|---|
+| baseline | 18 | 100% | 9 | 0 | 见实验机 GATES.md | 3 |
+| warn | 18 | 100% | 见实验机 GATES.md | 0 | 见实验机 GATES.md | 见实验机 GATES.md |
+| block | 18 | 100% | 0 | 0 | 6/6 | 0 |
+
+### 环境与一致性
+
+- 模型：`deepseek-v4-flash`（全部轮次一致）；Harness commit：`47f9438…`（全部轮次一致；GATES.md 顶部一致性检查通过，无警告）。
+- 实验目录：`E:\code\dsh-negative-ledger-formal-050602ed\benchmark\runs\`（gitignored，保留审计：`manifest.jsonl`/`summary.json`/`GATES.md`/逐轮 `result.jsonl`）。
+- 审计摘要：[FORMAL-RESULTS.md](FORMAL-RESULTS.md)。
 
 ## 门槛与修复纪律
 
