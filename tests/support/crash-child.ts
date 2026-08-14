@@ -60,13 +60,22 @@ try {
     const leaseId = rest[0]!; const owner = rest[1]!; const factId = rest[2]!
     const store = new SqliteLedgerStore({ dir })
     await waitForGo()
-    const result: AttemptDecisionResult = await store.commitAttemptDecision({
-      factId,
-      expectedRevision: 1,
-      decision: 'verify-retry',
-      meta: { operationId: `v-${process.pid}` },
-      leaseRequest: { leaseId, owner, ttlMs: 60_000 },
-    })
+    // The raw store reports write-lock contention as { kind: 'unavailable',
+    // reason: 'store busy' }; retrying within a bounded window mirrors the
+    // policy's storeBusyDeadlineMs contract (callers, not the store, back off).
+    const deadline = Date.now() + 2000
+    let result: AttemptDecisionResult | null = null
+    for (;;) {
+      result = await store.commitAttemptDecision({
+        factId,
+        expectedRevision: 1,
+        decision: 'verify-retry',
+        meta: { operationId: `v-${process.pid}` },
+        leaseRequest: { leaseId, owner, ttlMs: 60_000 },
+      })
+      if (result.kind !== 'unavailable' || result.reason !== 'store busy' || Date.now() >= deadline) break
+      await new Promise(resolve => setTimeout(resolve, 15 + Math.random() * 30))
+    }
     report(result)
     await store.close()
     process.exit(0)
