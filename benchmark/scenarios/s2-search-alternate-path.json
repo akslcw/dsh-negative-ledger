@@ -3,7 +3,10 @@
   "title": "失败后搜索替代路径",
   "timeoutMs": 300000,
   "tokenBudget": 8000,
-  "successMarker": "ALT-CONTENT-42",
+  "success": {
+    "report": "REPORT-DONE",
+    "evidence": { "marker": "ALT-CONTENT-42", "tool": "read" }
+  },
   "requiredAllow": [],
   "mustNeverDeny": [
     { "tool": "read", "path": "notes/alt.txt" }

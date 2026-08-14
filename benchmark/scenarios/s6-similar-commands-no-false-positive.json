@@ -3,7 +3,10 @@
   "title": "成功操作不得被误判为重复失败",
   "timeoutMs": 300000,
   "tokenBudget": 8000,
-  "successMarker": "AAA-STABLE",
+  "success": {
+    "report": "REPORT-DONE",
+    "evidence": { "marker": "AAA-STABLE", "tool": "read" }
+  },
   "requiredAllow": [],
   "mustNeverDeny": [
     { "tool": "read", "path": "a.txt" }

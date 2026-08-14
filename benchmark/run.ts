@@ -17,25 +17,18 @@ import { pathToFileURL } from 'node:url'
 import Database from 'better-sqlite3'
 import {
   decodeSessionLogFile,
-  eventText,
   extractToolCalls,
+  extractToolResultTexts,
   extractUsage,
+  finalAssistantVisibleText,
   findSessionLogs,
   relativeTo,
 } from './session-log.ts'
+import { resolveScenario } from './resolve.ts'
+import type { ScenarioSource } from './resolve.ts'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const runsRoot = join(projectRoot, 'benchmark', 'runs')
-
-interface ScenarioDef {
-  id: string
-  title: string
-  timeoutMs: number
-  tokenBudget: number
-  successMarker: string
-  requiredAllow: { tool: string; path?: string; commandLinePrefix?: string }[]
-  prompt: string
-}
 
 interface LedgerSnapshot {
   totals: { duplicateFailuresObserved: number; warningsEmitted: number; callsDenied: number }
@@ -55,7 +48,9 @@ interface RunResult {
   exitCode: number | null
   timedOut: boolean
   success: boolean
-  successSource: 'stdout' | 'events' | 'none'
+  successSource: 'full' | 'report-only' | 'evidence-only' | 'none'
+  successReport: boolean
+  successEvidence: boolean
   stdioMode: 'capture' | 'inherit'
   stdoutTail: string
   stderrTail: string
@@ -153,7 +148,7 @@ async function main(): Promise<void> {
   if ((process.env.DEEPSEEK_API_KEY ?? '') === '') {
     console.warn('run.ts: DEEPSEEK_API_KEY is not set; the run will fail unless the CLI finds a key elsewhere')
   }
-  const scenario = loadJson<ScenarioDef>(join(projectRoot, 'benchmark', 'scenarios', `${scenarioId}.json`))
+  const scenario = resolveScenario(loadJson<ScenarioSource>(join(projectRoot, 'benchmark', 'scenarios', `${scenarioId}.json`)), process.platform)
 
   const runDir = join(runsRoot, scenarioId, profile, iteration)
   rmSync(runDir, { recursive: true, force: true })
@@ -162,6 +157,9 @@ async function main(): Promise<void> {
   mkdirSync(workspace, { recursive: true })
   const dshHome = join(runDir, 'dsh-home')
   const ledgerDir = join(runDir, 'ledger-db')
+  // The resolved scenario (platform shell tool, platform command, resolved
+  // prompt) is the single source of truth for this run and for the summarizer.
+  writeFileSync(join(runDir, 'scenario-resolved.json'), `${JSON.stringify(scenario, null, 2)}\n`)
 
   const seedDir = join(projectRoot, 'benchmark', 'scenarios', scenarioId, 'seed')
   if (existsSync(seedDir)) copyTree(seedDir, workspace)
@@ -237,9 +235,19 @@ async function main(): Promise<void> {
 
   const toolCalls = extractToolCalls(allEvents)
   const usage = extractUsage(allEvents)
-  const text = eventText(allEvents)
-  const success = stdout.includes(scenario.successMarker) || text.includes(scenario.successMarker)
-  const successSource: RunResult['successSource'] = stdout.includes(scenario.successMarker) ? 'stdout' : success ? 'events' : 'none'
+  // Success = report marker in the final assistant's visible text (reasoning
+  // excluded) AND, when the scenario declares evidence, the marker appearing
+  // in an actual non-error tool output of the declared tool.
+  const finalText = finalAssistantVisibleText(allEvents)
+  const reportOk = finalText.includes(scenario.success.report)
+  const evidence = scenario.success.evidence
+  const evidenceOk = evidence === undefined
+    ? true
+    : extractToolResultTexts(allEvents).some(
+        result => !result.isError && (evidence.tool === undefined || result.tool === evidence.tool) && result.text.includes(evidence.marker),
+      )
+  const success = reportOk && evidenceOk
+  const successSource: RunResult['successSource'] = success ? 'full' : reportOk ? 'report-only' : evidenceOk ? 'evidence-only' : 'none'
 
   let warnInjections = 0
   let releaseInjections = 0
@@ -288,6 +296,8 @@ async function main(): Promise<void> {
     timedOut,
     success,
     successSource,
+    successReport: reportOk,
+    successEvidence: evidenceOk,
     stdioMode: inheritMode ? 'inherit' : 'capture',
     stdoutTail: cap(stdout.slice(-4000), 4000),
     stderrTail: cap(stderr.slice(-4000), 4000),
@@ -317,6 +327,7 @@ async function main(): Promise<void> {
   )
   console.log(
     `[run] ${scenarioId}/${profile}/${iteration} done: exit=${String(exit.code)} timedOut=${String(timedOut)} success=${String(success)} ` +
+      `(report=${String(reportOk)} evidence=${String(evidenceOk)}) ` +
       `toolCalls=${toolCalls.length} tokensIn=${usage.inputTokens} tokensOut=${usage.outputTokens} ` +
       `warnInjections=${warnInjections} blockedByLedger=${blockedByLedgerCalls} ` +
       `ledger=${JSON.stringify(result.ledger.totals)}${result.ledger.error ? ` (${result.ledger.error})` : ''}`,

@@ -35,9 +35,11 @@ node benchmark/summarize.ts
 
 检查要点：
 
-- 每轮产物 `benchmark/runs/<scenario>/<profile>/<iter>/` 下有 `result.jsonl`、`session-logs/`、`session-decoded/`、`ledger-db/`（warn/block 组）。
+- 每轮产物 `benchmark/runs/<scenario>/<profile>/<iter>/` 下有 `result.jsonl`、`session-logs/`、`session-decoded/`、`ledger-db/`（warn/block 组）、`scenario-resolved.json`（平台解析后的场景）。
+- 成功判定是双条件：`report` 标记必须在**最终 assistant 可见文本**（reasoning 不算），声明 `evidence` 的场景还必须出现在**对应工具的非 error 输出**里；`result.jsonl` 的 `successReport`/`successEvidence` 两个布尔可直接核对。
 - Baseline 的 s1 应产生 ≥2 次重复失败（模型可能不听话，看 stdout 与工具序列核对）。
 - Block 的 s3/s4 必须出现「先失败 → 证据变化 → 重试成功」；若模型不按脚本走（例如直接 write 不先 read），先修提示词，**不改插件**。
+- s4 是平台自适应的：Windows 用 `pwsh` 工具执行 PowerShell 命令，Linux/macOS 用 `bash` 工具执行 POSIX 命令（见 `scenarios/s4-command-ttl-retry.json` 的 `command` 字段，由 run.ts 按 `process.platform` 解析）；第一步与第三步必须是**完全相同**的命令串。
 - 采集器问题（崩溃、字段缺失、解码失败）修 `benchmark/*.ts` 后重跑受影响轮次。
 
 ## 正式实验（54 轮：6 场景 × 3 组 × 3 次）
@@ -56,11 +58,14 @@ $env:DEEPSEEK_API_KEY = "<key>"
 
 - 顺序：固定 seed（`20260814`，可用 `NEGLEDGER_SEED` 覆盖）Fisher–Yates 洗牌；计划在开跑前写入 `runs/formal-plan.json`，实际顺序由 `runs/manifest.jsonl` 时间戳记录。
 - 每轮 token 预算见 `scenarios/<id>.json` 的 `tokenBudget`；分批执行时注意：`run-formal.ps1` 一次跑完 54 轮，需要中断时直接 Ctrl-C，已完成的轮次不会丢，但**重新执行会按新 seed 顺序补跑并覆盖同格结果**——断点续跑请按 `runs/manifest.jsonl` 里缺失的格手动 `node benchmark/run.ts <s> <p> <i>` 补齐。
-- 运行顺序影响：三组共享控制变量（同一 checkout、同一提示词、全新 DSH_HOME 与账本），但模型输出本身有方差——因此每组各 3 次取聚合，正式结论以 `benchmark/runs/GATES.md` 的 7 道门槛为准。GATES.md 标注阶段：只有每格 ≥3 轮的 `formal` 数字可用于对外宣传；18 轮单次是 `trial`，更少是 `pilot`。
+- 运行顺序影响：三组共享控制变量（同一 checkout、同一提示词、全新 DSH_HOME 与账本），但模型输出本身有方差——因此每组各 3 次取聚合，正式结论以 `benchmark/runs/GATES.md` 的 7 道门槛为准。GATES.md 标注阶段：只有每格 ≥3 轮的 `formal` 数字可用于对外宣传（并附模型名与 harness commit）；18 轮单次是 `trial`，更少是 `pilot`。
+- **无效批次不混入统计**：若发现采集器缺陷导致整批数据不可信（例如成功判定误报），该批次整体作废、在 GATES.md 中标注原因，原始数据保留备审，然后从新目录重跑全部 54 轮——不补跑、不拼接。
 
-## pilot（已完成的沙箱内 16 轮验证）
+## pilot（已完成的局部验证）
 
-受限环境内已完成 s1/s2/s3/s5/s6 × 3 组 + s4 baseline 探测共 16 轮：采集链路、7 道门槛计算、插件 warn/block/放行/跨代理行为全部验证，GATES.md 标注 `[pilot, 非正式结论]`。**pilot 数字不代表效果结论**；s4（bash）在该环境无法执行（嵌套沙箱 ACL），正式结论必须来自上面 54 轮。
+受限环境内已完成 s1/s2/s3/s5/s6 × 3 组 + s4 baseline 探测共 16 轮：采集链路、7 道门槛计算、插件 warn/block/放行/跨代理行为全部验证，GATES.md 标注 `[pilot, 非正式结论]`。**pilot 数字不代表效果结论**。
+
+2026-08 的一次正式批次（41/54 轮）因两处采集器缺陷整体作废、未写成 benchmark 结果：① 成功标记曾在全量 session 文本中搜索，模型的 reasoning 引用标记也会判成功；② 当时 s4 依赖 POSIX `sh`，在 Windows DSH（pwsh 工具）上测到的是 shell 兼容性而非插件行为。两处均已修复（双条件成功判定 + s4 平台自适应），原始数据保留备审，正式结论必须来自修复后从新目录重跑的完整 54 轮。
 
 ## 门槛与修复纪律
 

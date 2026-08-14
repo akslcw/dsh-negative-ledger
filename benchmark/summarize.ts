@@ -32,6 +32,9 @@ interface RunRecord {
   profile: string
   iteration: string
   success: boolean
+  successSource?: string
+  successReport?: boolean
+  successEvidence?: boolean
   timedOut: boolean
   exitCode: number | null
   toolCalls: ResultToolCall[]
@@ -44,6 +47,8 @@ interface RunRecord {
   durationMs: number
   tokenIn: number
   tokenOut: number
+  harnessCommit?: string
+  model?: string | null
 }
 
 interface CellMetrics {
@@ -85,6 +90,13 @@ function listScenarios(): string[] {
 
 function scenarioDef(id: string): ScenarioDef {
   return loadJson<ScenarioDef>(join(scenariosRoot, `${id}.json`))
+}
+
+/** Per-run resolved scenario (platform shell + command), falling back to the static file. */
+function resolvedDef(run: RunRecord): ScenarioDef {
+  const file = join(runsRoot, run.scenario, run.profile, run.iteration, 'scenario-resolved.json')
+  if (existsSync(file)) return loadJson<ScenarioDef>(file)
+  return scenarioDef(run.scenario)
 }
 
 function collectRuns(): RunRecord[] {
@@ -304,7 +316,7 @@ function computeCells(runs: RunRecord[]): Map<string, CellMetrics> {
     cell.repeatFailures += repeatFailuresIn(run.toolCalls)
     cell.wrongBlocks += wrongBlocksForRun(run, runDir)
     cell.crossAgentRepeats += crossAgentRepeats(runDir)
-    const def = scenarioDef(run.scenario)
+    const def = resolvedDef(run)
     cell.denyOnMustNeverDeny += denyViolations(run, def)
     cell.requiredAllowSatisfied += satisfiedRequiredAllow(def, run.toolCalls)
     cell.requiredAllowTotal += def.requiredAllow.length
@@ -408,10 +420,14 @@ function evaluateGates(cells: Map<string, CellMetrics>, runs: RunRecord[]): Gate
   const consistentDenies = warn.deniedFromLedger === warn.blockedByLedgerCalls && block.deniedFromLedger === block.blockedByLedgerCalls
   const consistentWarns = warn.warningsFromLedger === warn.warnInjections
 
-  // G6 scopes to s1, the scenario whose prompt guarantees repeat pressure:
-  // other scenarios legitimately produce zero warnings.
+  // G6 scopes to s1, the scenario whose prompt guarantees repeat pressure,
+  // and is a conditional implication: a warn round is only judged when the
+  // run actually exhibited a repeated failing call (repeatFailuresIn >= 1);
+  // rounds where the model never repeated cannot trigger a warning and are
+  // exempt, never counted against the plugin.
   const s1WarnRuns = runs.filter(run => run.scenario === 's1-missing-read-repeat' && run.profile === 'warn')
-  const s1WarnInjected = s1WarnRuns.filter(run => run.policy.warnInjections >= 1).length
+  const s1WarnPressureRounds = s1WarnRuns.filter(run => repeatFailuresIn(run.toolCalls) >= 1)
+  const s1WarnInjected = s1WarnPressureRounds.filter(run => run.policy.warnInjections >= 1).length
 
   const gates: Gate[] = [
     {
@@ -440,9 +456,9 @@ function evaluateGates(cells: Map<string, CellMetrics>, runs: RunRecord[]): Gate
       detail: `baseline=${base.crossAgentRepeats}, block=${block.crossAgentRepeats}, reduction=${crossReduction === null ? 'n/a' : pct(crossReduction)}`,
     },
     {
-      name: 'G6 Warn 每轮都注入提醒',
-      passed: s1WarnRuns.length > 0 && s1WarnInjected === s1WarnRuns.length,
-      detail: `s1 warn ${s1WarnInjected}/${s1WarnRuns.length} rounds injected`,
+      name: 'G6 Warn 在重复压力轮注入提醒',
+      passed: s1WarnPressureRounds.length > 0 && s1WarnInjected === s1WarnPressureRounds.length,
+      detail: `s1 warn 重复压力轮注入 ${s1WarnInjected}/${s1WarnPressureRounds.length}（s1 warn 总轮次 ${s1WarnRuns.length}，无重复压力的轮次豁免）`,
     },
     {
       name: 'G7 账本计数与会话日志一致',
@@ -501,20 +517,43 @@ function main(): void {
     console.log(`${gate.passed ? 'PASS' : 'FAIL'}  ${gate.name} — ${gate.detail}`)
   }
 
+  // Environment consistency: every formal number must come from one model on
+  // one harness commit; mixed sources are reported, never silently pooled.
+  const models = [...new Set(runs.map(run => run.model ?? 'unknown'))]
+  const commits = [...new Set(runs.map(run => run.harnessCommit ?? 'unknown'))]
+  const consistency: string[] = []
+  if (models.length > 1) consistency.push(`model 不唯一: ${models.join(', ')}`)
+  if (commits.length > 1) consistency.push(`harnessCommit 不唯一: ${commits.join(', ')}`)
+  if (consistency.length > 0) {
+    console.log('\n⚠ 一致性警告：')
+    for (const line of consistency) console.log(`  - ${line}`)
+  }
+
   const summary = {
     generatedAt: new Date().toISOString(),
     groups: { baseline: base, warn, block },
     gates,
     cells: Object.fromEntries(cells),
+    consistency,
+    models,
+    harnessCommits: commits,
   }
   mkdirSync(runsRoot, { recursive: true })
   writeFileSync(join(runsRoot, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`)
+  const cellRows = listScenarios().flatMap(scenario =>
+    Object.keys(PROFILE_NAMES).map(profile => {
+      const cell = cells.get(`${scenario}/${profile}`)
+      return `| ${scenario} | ${profile} | ${cell?.iterations ?? 0} | ${cell?.repeatFailures ?? 0} | ${cell?.wrongBlocks ?? 0} | ${cell?.denyOnMustNeverDeny ?? 0} | ${cell?.requiredAllowSatisfied ?? 0}/${cell?.requiredAllowTotal ?? 0} |`
+    }),
+  )
   const gateLines = [
     '# 发布门槛评估',
     '',
     `生成时间：${summary.generatedAt}`,
     '',
     `阶段：${stage}（formal = 每格 3 轮；trial = 18 轮单次；pilot = 更少）`,
+    `模型：${models.join(', ')}；harness commit：${commits.join(', ')}`,
+    ...(consistency.length > 0 ? ['', '**一致性警告**：', ...consistency.map(line => `- ${line}`)] : []),
     '',
     '| 门槛 | 判定 | 说明 |',
     '|---|---|---|',
@@ -528,6 +567,12 @@ function main(): void {
       const total = { baseline: base, warn, block }[name]
       return `| ${name} | ${total.iterations} | ${total.completionRate === null ? 'n/a' : pct(total.completionRate)} | ${total.repeatFailures} | ${total.wrongBlocks} | ${total.requiredAllowSatisfied}/${total.requiredAllowTotal} | ${total.crossAgentRepeats} | ${total.tokenIn}/${total.tokenOut} |`
     }),
+    '',
+    '## 逐格明细（审计用）',
+    '',
+    '| 场景 | 组 | 轮次 | 重复失败 | 错误阻止 | denyOnMustNeverDeny | 放行 |',
+    '|---|---|---|---|---|---|---|',
+    ...cellRows,
     '',
   ]
   writeFileSync(join(runsRoot, 'GATES.md'), `${gateLines.join('\n')}\n`)

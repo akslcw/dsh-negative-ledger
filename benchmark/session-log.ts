@@ -253,6 +253,70 @@ export function eventText(events: unknown[]): string {
   return text
 }
 
+/**
+ * Visible text of the final assistant message. Only `text` blocks count:
+ * `reasoning`/`thinking` blocks are model-internal and must never satisfy a
+ * success marker. Walks backwards to the last assistant message carrying text.
+ */
+export function finalAssistantVisibleText(events: unknown[]): string {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = asEvent(events[i])
+    if (event === null || event.data === undefined || event.type !== 'assistant/message') continue
+    const message = event.data.message
+    if (!isRecord(message) || !Array.isArray(message.content)) continue
+    const visible: string[] = []
+    for (const block of message.content) {
+      if (isRecord(block) && block.type === 'text' && typeof block.text === 'string') visible.push(block.text)
+    }
+    if (visible.length > 0) return visible.join('\n')
+  }
+  return ''
+}
+
+/** Text output of one tool/result event, joined from its content blocks. */
+export interface ToolResultText {
+  tool: string
+  text: string
+  isError: boolean
+}
+
+/**
+ * Tool-output evidence: for every tool/result event, the tool name (joined
+ * from the matching tool/call) and the text the tool actually produced.
+ * Marker checks for evidence must use these texts — never assistant text.
+ */
+export function extractToolResultTexts(events: unknown[]): ToolResultText[] {
+  const names = new Map<string, string>()
+  const results: ToolResultText[] = []
+  for (const raw of events) {
+    const event = asEvent(raw)
+    if (event === null || event.data === undefined) continue
+    if (event.type === 'tool/call') {
+      const callId = String(event.data.callId ?? '')
+      if (callId !== '') names.set(callId, String(event.data.name ?? ''))
+      continue
+    }
+    if (event.type !== 'tool/result') continue
+    const message = event.data.message
+    if (!isRecord(message) || !Array.isArray(message.content)) continue
+    const source = isRecord(message.source) ? message.source : null
+    const callId = source !== null && typeof source.callId === 'string' ? source.callId : ''
+    let text = ''
+    let isError = false
+    for (const block of message.content) {
+      if (!isRecord(block) || block.type !== 'tool-result') continue
+      if (block.isError === true) isError = true
+      if (Array.isArray(block.content)) {
+        for (const part of block.content) {
+          if (isRecord(part) && typeof part.text === 'string') text += `${part.text}\n`
+        }
+      }
+    }
+    results.push({ tool: names.get(callId) ?? '', text, isError })
+  }
+  return results
+}
+
 /** Relative path (forward slashes) used in collected artifacts. */
 export function relativeTo(root: string, file: string): string {
   return relative(root, file).replaceAll('\\', '/')

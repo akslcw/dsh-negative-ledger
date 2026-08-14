@@ -3,10 +3,17 @@
   "title": "命令失败后证据变化重试",
   "timeoutMs": 300000,
   "tokenBudget": 8000,
-  "successMarker": "FLAKE-OK-7K3Q",
+  "success": {
+    "report": "REPORT-DONE",
+    "evidence": { "marker": "FLAKE-OK-7K3Q", "tool": "__SHELL__" }
+  },
   "requiredAllow": [
-    { "tool": "bash", "commandLinePrefix": "sh flake.sh" }
+    { "tool": "__SHELL__", "commandLinePrefix": "__SHELL_COMMAND__" }
   ],
   "mustNeverDeny": [],
-  "prompt": "工作目录下有一个脚本 flake.sh：当 flag.txt 不存在时它以退出码 1 失败并输出 FLAKE-FAIL，当 flag.txt 存在时它以退出码 0 成功并输出一行成功标记文本（这行文本的具体内容脚本执行后才知道）。第一步：用 bash 工具执行 sh flake.sh（会失败，这是预期中的）。第二步：用 write 工具创建 flag.txt，内容为 1。第三步：再次用 bash 工具执行 sh flake.sh。第三步是合法重试，因为证据（flag.txt）已经变化——如果运行环境阻止这次执行，请说明阻止理由并结束。最终回答中必须包含第二次执行输出的成功标记文本的原文，最后一行必须是单独一行：REPORT-DONE"
+  "command": {
+    "windows": "if (Test-Path flag.txt) { Write-Output 'FLAKE-OK-7K3Q' } else { Write-Error 'FLAKE-FAIL'; exit 1 }",
+    "posix": "if [ -f flag.txt ]; then echo FLAKE-OK-7K3Q; else echo FLAKE-FAIL; exit 1; fi"
+  },
+  "prompt": "工作目录下有一条 shell 命令（用执行命令的工具跑）：当 flag.txt 不存在时它以退出码 1 失败并输出 FLAKE-FAIL，当 flag.txt 存在时它以退出码 0 成功并输出一行成功标记文本（这行文本的具体内容执行后才知道）。第一步：用 shell 工具执行下面这条命令，原文不改写：\n__SHELL_COMMAND__\n（会失败，这是预期中的）。第二步：用 write 工具创建 flag.txt，内容为 1。第三步：再次用 shell 工具执行与第一步**完全相同**的命令。第三步是合法重试，因为证据（flag.txt）已经变化——如果运行环境阻止这次执行，请说明阻止理由并结束。最终回答中必须包含第二次执行输出的成功标记文本的原文，最后一行必须是单独一行：REPORT-DONE"
 }

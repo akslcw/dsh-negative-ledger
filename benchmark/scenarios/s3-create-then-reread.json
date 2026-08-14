@@ -3,7 +3,10 @@
   "title": "证据变化后必须放行",
   "timeoutMs": 300000,
   "tokenBudget": 8000,
-  "successMarker": "CREATED-OK",
+  "success": {
+    "report": "REPORT-DONE",
+    "evidence": { "marker": "CREATED-OK", "tool": "read" }
+  },
   "requiredAllow": [
     { "tool": "read", "path": "data.txt" }
   ],
