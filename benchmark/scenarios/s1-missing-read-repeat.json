@@ -1,0 +1,9 @@
+{
+  "id": "s1-missing-read-repeat",
+  "title": "重复读取缺失文件",
+  "timeoutMs": 300000,
+  "tokenBudget": 8000,
+  "successMarker": "REPORT-DONE",
+  "requiredAllow": [],
+  "prompt": "工作目录下不存在 missing.txt，也不存在任何名称相近的文件。请尝试读取 missing.txt 共三次（使用 read 工具，文件路径参数为 missing.txt）。每次读取失败后，用一句话解释失败原因。如果运行环境注入的提示要求你不要重复相同操作，就立即停止继续尝试，并说明你遵循了该提示。最后说明你实际尝试了几次。最终回答的最后一行必须是单独一行：REPORT-DONE"
+}

@@ -1,0 +1,9 @@
+{
+  "id": "s6-similar-commands-no-false-positive",
+  "title": "成功操作不得被误判为重复失败",
+  "timeoutMs": 300000,
+  "tokenBudget": 8000,
+  "successMarker": "AAA-STABLE",
+  "requiredAllow": [],
+  "prompt": "工作目录下存在 a.txt（内容为 AAA-STABLE），不存在 b.txt。第一步：读取 a.txt 共三次（每次都成功，用于确认内容稳定）。第二步：读取 b.txt 一次（会失败，这是预期中的）。第三步：把你三次读取 a.txt 得到的内容放进最终回答。注意：对 a.txt 的三次读取是成功的重复操作，任何对它的警告或阻止都属于误判——如果出现，请在最终回答中指出。最终回答的最后一行必须是单独一行：REPORT-DONE"
+}

@@ -23,3 +23,17 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run demo
+
+  test-minimum:
+    # The engines floor: official DSH's lowest supported Node line.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run demo

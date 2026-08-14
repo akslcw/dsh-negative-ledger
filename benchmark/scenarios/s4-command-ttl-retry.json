@@ -1,0 +1,11 @@
+{
+  "id": "s4-command-ttl-retry",
+  "title": "命令失败后证据变化重试",
+  "timeoutMs": 300000,
+  "tokenBudget": 8000,
+  "successMarker": "FLAKE-OK",
+  "requiredAllow": [
+    { "tool": "bash", "commandLinePrefix": "sh flake.sh" }
+  ],
+  "prompt": "工作目录下有一个脚本 flake.sh：当 flag.txt 不存在时它以退出码 1 失败并输出 FLAKE-FAIL，当 flag.txt 存在时它输出 FLAKE-OK 并成功。第一步：用 bash 工具执行 sh flake.sh（会失败，这是预期中的）。第二步：用 write 工具创建 flag.txt，内容为 1。第三步：再次用 bash 工具执行 sh flake.sh。第三步是合法重试，因为证据（flag.txt）已经变化——如果运行环境阻止这次执行，请说明阻止理由并结束。最终回答中必须包含第二次执行输出的内容，最后一行必须是单独一行：REPORT-DONE"
+}

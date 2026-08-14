@@ -1,0 +1,12 @@
+# Warn group: official reminder off; Negative Ledger warn over sqlite.
+# __LEDGER_DIR__ is replaced per run by benchmark/run.ts.
+- id: repeat-tool-reminder
+  disabled: true
+
+- insert:
+    - id: negative-ledger
+      name: ../../../../src/plugin.ts
+      config:
+        backend: sqlite
+        mode: warn
+        dir: __LEDGER_DIR__
