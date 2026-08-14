@@ -23,7 +23,7 @@
     }
   },
   "bin": {
-    "dsh-negative-ledger": "./dist/bin.mjs"
+    "dsh-negative-ledger": "dist/bin.mjs"
   },
   "files": [
     "dist",
