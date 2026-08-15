@@ -1,0 +1,8 @@
+# Bundle layer for @akslcw/dsh-negative-ledger: mounts the ledger policy
+# with production defaults (sqlite backend, warn mode, default TTLs).
+# Override the row by id in a later layer (e.g. the profile's own
+# cordis.patch.yml): a patch replaces the row's whole config, so restate
+# every key you change.
+- insert:
+    - id: negative-ledger
+      name: '@akslcw/dsh-negative-ledger'

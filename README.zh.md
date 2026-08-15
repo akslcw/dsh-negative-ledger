@@ -19,15 +19,28 @@
 
 差异化：**DSH 原生、证据约束的持久负面记忆门禁**——失败结论随环境证据自动生效与吊销，并在并发代理之间保持事务一致。
 
-## 快速开始
+## 快速开始：一条命令安装
 
 ```sh
-# 仅引擎 + CLI
-node src/cli.ts --dir .ledger stats
+dsh plugin --profile <name> add @akslcw/dsh-negative-ledger
+```
 
-# 三个可复现演示（S1 命令去重 / S2 缺失文件去重 / S3 证据失效），
-# 自带验收断言与节省报告
-node demos/run-demos.ts
+安装并激活 bundle 层：随包发布的 `cordis.patch.yml`（由 `dsh.bundle` 清单声明）以生产默认值挂载账本策略——sqlite 后端、`warn` 模式、`.ledger` 目录、默认 TTL。先不启动、验证组合，再启动：
+
+```sh
+dsh --profile <name> --dump-config   # 可见 "@akslcw/dsh-negative-ledger" 层与 negative-ledger 行
+dsh --profile <name>                 # 启动
+```
+
+卸载：`dsh plugin --profile <name> remove @akslcw/dsh-negative-ledger`。干净环境端到端 smoke（安装 → 层可见 → headless warn + sqlite 账本 → 卸载 → profile 仍可启动）：`powershell -File smoke/plugin-add-smoke.ps1`。
+
+> **pnpm 11 注意**：pnpm ≥11 把「忽略构建脚本」升级为硬错误，`add` 会以 `ERR_PNPM_IGNORED_BUILDS: better-sqlite3` 失败。better-sqlite3 随包自带官方预编译产物，被忽略的脚本完全无害、不需要编译。在 profile 目录执行 `pnpm config set --location project strict-dep-builds false` 后重跑 `add` 即可。（若改为允许构建，则会从源码编译 better-sqlite3，需要 C++ 工具链。）
+
+仅引擎 + CLI（checkout 内调试，不挂 DSH 组合）：
+
+```sh
+node src/cli.ts --dir .ledger stats
+node demos/run-demos.ts      # S1 命令去重 / S2 缺失文件去重 / S3 证据失效，自带验收断言与节省报告
 ```
 
 要求 Node `^22.19.0 || >=24.0.0`（与官方 DSH 的 engines 范围对齐）。
@@ -60,12 +73,21 @@ node src/cli.ts [--dir <path>] [--backend sqlite|jsonl] <list | show <id> | stal
 
 ## DSH 接入
 
+随包发布的 bundle 层即：
+
 ```yaml
 - id: negative-ledger
-  name: dsh-negative-ledger
+  name: '@akslcw/dsh-negative-ledger'
+```
+
+在更后层的 patch（你的 profile 的 `cordis.patch.yml`）中按 `id` 覆盖该行——patch 会整体替换 `config`，改哪个键就重写全部：
+
+```yaml
+- id: negative-ledger
+  name: '@akslcw/dsh-negative-ledger'
   config:
     backend: sqlite       # sqlite（默认，事务性）| jsonl（旧版单进程）
-    mode: warn            # off | warn | block（默认 warn）
+    mode: block           # off | warn | block（默认 warn）
     dir: .ledger          # 账本目录（默认 .ledger）
     commandRetryAfterMs: 300000   # 自动记录的命令事实的重试 TTL
     commandTools: [bash, pwsh]   # 记录为 command_failed

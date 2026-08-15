@@ -52,6 +52,13 @@ try {
   execFileSync(process.execPath, [join(consumer, 'probe.mjs')], { stdio: 'inherit' })
   const bin = join(consumer, 'node_modules', '@akslcw', 'dsh-negative-ledger', 'dist', 'bin.mjs')
   execFileSync(process.execPath, [bin, '--dir', ledgerDir, '--backend', 'sqlite', 'stats'], { stdio: 'inherit' })
+  // The bundle layer must ship and declare the plugin row by package name.
+  const pkgRoot = join(consumer, 'node_modules', '@akslcw', 'dsh-negative-ledger')
+  const installedManifest = JSON.parse(readFileSync(join(pkgRoot, 'package.json'), 'utf8'))
+  if (installedManifest.dsh?.bundle?.patch !== './cordis.patch.yml') throw new Error('dsh.bundle manifest missing in installed package')
+  const patch = readFileSync(join(pkgRoot, 'cordis.patch.yml'), 'utf8')
+  if (!patch.includes("name: '@akslcw/dsh-negative-ledger'")) throw new Error('bundle patch does not mount the plugin row')
+  console.log('consumer bundle layer ok')
   console.log('pack-test ok')
 } finally {
   rmSync(tarball, { force: true })
