@@ -1,6 +1,6 @@
 {
   "name": "@akslcw/dsh-negative-ledger",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Agent negative-knowledge ledger for DeepSeek Harness: records failed paths with evidence hashes and retry conditions, auto-invalidates on evidence change.",
   "type": "module",
   "license": "MIT",
@@ -20,18 +20,25 @@
     ".": {
       "types": "./dist/index.d.mts",
       "default": "./dist/index.mjs"
-    }
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml"
   },
   "bin": {
     "dsh-negative-ledger": "dist/bin.mjs"
   },
   "files": [
     "dist",
+    "cordis.patch.yml",
     "README.md",
     "README.zh.md",
     "DESIGN.md",
     "DESIGN-SQLITE.md"
   ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
   "scripts": {
     "build": "tsdown",
     "typecheck": "tsc --noEmit",

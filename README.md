@@ -19,20 +19,27 @@ A negative-knowledge ledger for coding agents. It records only **disproven paths
 
 The differentiation: a DSH-native, evidence-bound persistent negative-memory gate — failure conclusions activate and revoke themselves with the environmental evidence, and stay transactionally consistent across concurrent agents.
 
-## Quick start
+## Quick start — one-command install
 
 ```sh
-# engine only
+dsh plugin --profile <name> add @akslcw/dsh-negative-ledger
+```
+
+Installs the package and activates its bundle layer: the shipped `cordis.patch.yml` (declared by the `dsh.bundle` manifest) mounts the ledger policy with production defaults — sqlite backend, `warn` mode, `.ledger` directory, default TTLs. Verify without booting, then boot:
+
+```sh
+dsh --profile <name> --dump-config   # the "@akslcw/dsh-negative-ledger" layer and its negative-ledger row
+dsh --profile <name>                 # boot
+```
+
+Remove: `dsh plugin --profile <name> remove @akslcw/dsh-negative-ledger`. A clean-environment end-to-end smoke (add → layer → headless warn + sqlite ledger → remove → profile still boots) is `powershell -File smoke/plugin-add-smoke.ps1`.
+
+In-checkout hacking (engine and CLI only, no DSH composition):
+
+```sh
 node src/cli.ts --dir .ledger stats
-
-# the three reproducible demos (S1 command dedup, S2 missing-file dedup,
-# S3 evidence-change invalidation) with acceptance checks and a savings report
-node demos/run-demos.ts
-
-# real-mount smoke (run inside a deepseek-harness checkout with built libs):
-# boots the actual agent spine + fs provider + read/write tools, drives a
-# scripted model, and asserts the warning reaches the model's next request
-node smoke/real-mount.ts
+node demos/run-demos.ts      # S1 command dedup, S2 missing-file dedup, S3 evidence-change invalidation
+node smoke/real-mount.ts     # real-mount smoke inside a deepseek-harness checkout
 ```
 
 Requires Node `^22.19.0 || >=24.0.0` (aligned with the official DSH engines range).
@@ -65,12 +72,21 @@ Two store backends sit behind one `LedgerStore` seam: the default transactional 
 
 ## DSH integration
 
+The bundle layer shipped in the package is exactly:
+
 ```yaml
 - id: negative-ledger
-  name: dsh-negative-ledger
+  name: '@akslcw/dsh-negative-ledger'
+```
+
+Override the row by `id` in a later layer (your profile's `cordis.patch.yml`) — a patch replaces the whole `config`, so restate every key you change:
+
+```yaml
+- id: negative-ledger
+  name: '@akslcw/dsh-negative-ledger'
   config:
     backend: sqlite       # sqlite (default, transactional) | jsonl (legacy single-process)
-    mode: warn            # off | warn | block (default warn)
+    mode: block           # off | warn | block (default warn)
     dir: .ledger          # ledger directory (default .ledger)
     commandRetryAfterMs: 300000   # TTL on auto-recorded command facts
     commandTools: [bash, pwsh]   # recorded as command_failed
