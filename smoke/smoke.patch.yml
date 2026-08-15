@@ -1,0 +1,11 @@
+# Smoke patch overlay: mounts the ledger plugin row over a real profile boot.
+# Relative plugin specifiers resolve against the PROFILE directory
+# ($DSH_HOME/profiles/headless), not this file's directory — hence the four
+# ../ segments walk back to the project root. DSH_HOME must be
+# dsh-negative-ledger/smoke/.dsh-home (see observe-real.md).
+- insert:
+    - id: negative-ledger
+      name: ../../../../src/plugin.ts
+      config:
+        mode: warn
+        dir: dsh-negative-ledger/smoke/smoke-ledger
