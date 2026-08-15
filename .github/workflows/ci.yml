@@ -19,7 +19,32 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      - run: npm ci
+      # better-sqlite3 v13 ships official prebuilds (prebuilds/<platform>.node);
+      # --ignore-scripts skips npm's implicit node-gyp rebuild so Windows
+      # runners do not need a Visual Studio toolchain to be found.
+      - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm test
       - run: npm run demo
+      # Publish-artifact verification: build, tarball contents, and a real
+      # consumer install of the packed tarball (ESM import + bin smoke).
+      - run: npm run build
+      - run: npm pack --dry-run
+      - run: npm run pack-test
+
+  test-minimum:
+    # The engines floor: official DSH's lowest supported Node line.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run demo
+      - run: npm run build
+      - run: npm pack --dry-run
+      - run: npm run pack-test

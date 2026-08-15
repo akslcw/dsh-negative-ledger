@@ -5,4 +5,5 @@ dist/
 coverage/
 smoke/.dsh-home/
 smoke/smoke-ledger/
+benchmark/runs/
 *.tgz

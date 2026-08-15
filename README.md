@@ -17,7 +17,7 @@ A negative-knowledge ledger for coding agents. It records only **disproven paths
 3. While every precondition witness is unchanged, the attempt is **warned** (`warn` mode) or **denied** (`block` mode).
 4. Any precondition change marks the fact **stale** — the reminder is withdrawn and the retry is allowed. A successful retry marks it **resolved**.
 
-The differentiation: negative conclusion + evidence hash + retry condition + automatic invalidation + built-in savings metrics. No product combines these four; existing systems either deduplicate heuristically, cache reads, or track bug fixes.
+The differentiation: a DSH-native, evidence-bound persistent negative-memory gate — failure conclusions activate and revoke themselves with the environmental evidence, and stay transactionally consistent across concurrent agents.
 
 ## Quick start
 

@@ -85,8 +85,9 @@ describe('M4 dual-process acceptance', () => {
     assert.equal(await waitExit(a), 0)
     assert.equal(await waitExit(b), 0)
     const results = [childReport(dir, a.pid), childReport(dir, b.pid)] as Array<{ kind: string }>
-    assert.equal(results.filter(r => r.kind === 'applied').length, 1)
-    assert.equal(results.filter(r => r.kind === 'in-progress').length, 1)
+    const kinds = JSON.stringify(results)
+    assert.equal(results.filter(r => r.kind === 'applied').length, 1, `reports: ${kinds}`)
+    assert.equal(results.filter(r => r.kind === 'in-progress').length, 1, `reports: ${kinds}`)
     const store = new SqliteLedgerStore({ dir })
     const facts = await store.queryFacts()
     assert.equal(facts[0]?.lease?.owner.startsWith('agent-'), true)
