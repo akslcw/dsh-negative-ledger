@@ -74,6 +74,8 @@ Two store backends sit behind one `LedgerStore` seam: the default transactional 
 
 ## DSH integration
 
+Compatibility: tested with `@deepseek-ai/dsh-tools` `0.1.1-rc.2`. The package declares `>=0.1.1-rc.2 <0.2.0` as an optional peer range, so it documents the supported DSH event surface without installing a second DSH runtime.
+
 The bundle layer shipped in the package is exactly:
 
 ```yaml
