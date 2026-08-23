@@ -73,6 +73,8 @@ node src/cli.ts [--dir <path>] [--backend sqlite|jsonl] <list | show <id> | stal
 
 ## DSH 接入
 
+兼容性：已在 `@deepseek-ai/dsh-tools` `0.1.1-rc.2` 上验证。包中以可选 peer 声明 `>=0.1.1-rc.2 <0.2.0`，既标明支持的 DSH 事件接口范围，也不会额外安装第二份 DSH 运行时。
+
 随包发布的 bundle 层即：
 
 ```yaml

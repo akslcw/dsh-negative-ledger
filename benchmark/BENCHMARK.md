@@ -74,9 +74,9 @@ $env:DEEPSEEK_API_KEY = "<key>"
 
 修复：成功判定（可见文本 + 独立行证据 + repeat 绑定第二次同一 call）、s4 重写为 TTL 放行场景（实验专用 1s TTL + 显式等待 + 同命令重试）、read 证据改用 DSH 结构化 `data.meta.lines[].text`（展示文本永不参与证据解析）、采集器解析 shell 的 `[exit code: N]` 并把非零退出判为命令失败（**仅限 `pwsh`/`bash` 工具**：read 的文件内容即使含该文本也不算失败；真实日志格式回归测试随附）。
 
-## 正式结果（formal，2026-08-14）
+## 正式结果（formal，最近兼容性重跑：2026-08-23）
 
-第五次批次（修复后从干净目录 `dsh-negative-ledger-formal-050602ed` 重跑）：**54/54 轮完成，无超时、无非零退出，G1–G7 全部 PASS。** 以下为实验机生成的 `GATES.md` 摘要转录；逐轮原始数据保留在实验目录审计。
+`0.1.2` 候选兼容性重跑：首次运行因 API 余额耗尽只完成 27/54，整批归档且未混入统计；充值后清空 `benchmark/runs/`，以同一固定 seed 从头重跑，**54/54 轮完成，无超时、无非零退出，G1–G7 全部 PASS。** 以下为实验机生成的 `GATES.md` 摘要转录；逐轮原始数据保留在实验目录审计。2026-08-14 的第五次 54/54 正式批次仍是 `0.1.1` 的发布证据。
 
 ### 门槛表（GATES.md 转录）
 
@@ -94,14 +94,14 @@ $env:DEEPSEEK_API_KEY = "<key>"
 
 | 组 | 轮次 | 完成率 | 重复失败 | 错误阻止 | 放行 | 跨代理 |
 |---|---|---|---|---|---|---|
-| baseline | 18 | 100% | 9 | 0 | 见实验机 GATES.md | 3 |
-| warn | 18 | 100% | 见实验机 GATES.md | 0 | 见实验机 GATES.md | 见实验机 GATES.md |
+| baseline | 18 | 100% | 9 | 0 | 6/6 | 3 |
+| warn | 18 | 100% | 6 | 0 | 6/6 | 3 |
 | block | 18 | 100% | 0 | 0 | 6/6 | 0 |
 
 ### 环境与一致性
 
-- 模型：`deepseek-v4-flash`（全部轮次一致）；Harness commit：`47f9438…`（全部轮次一致；GATES.md 顶部一致性检查通过，无警告）。
-- 实验目录：`E:\code\dsh-negative-ledger-formal-050602ed\benchmark\runs\`（gitignored，保留审计：`manifest.jsonl`/`summary.json`/`GATES.md`/逐轮 `result.jsonl`）。
+- 模型：`deepseek-v4-flash`（全部轮次一致）；Harness commit：`29d5790c91104e80593049d5e7c3ad6e92d42945`（`0.1.1-rc.2` 基线加 Windows spill 目录恢复修复；全部轮次一致）。
+- 实验目录：`E:\code\deepseekharness\deepseek-harness\dsh-negative-ledger\benchmark\runs\`（gitignored，保留审计：`manifest.jsonl`/`summary.json`/`GATES.md`/逐轮 `result.jsonl`）。
 - 审计摘要：[FORMAL-RESULTS.md](FORMAL-RESULTS.md)。
 
 ## 门槛与修复纪律
