@@ -16,6 +16,7 @@ import { spawn, execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import Database from 'better-sqlite3'
 import {
+  classifyDenyBasis,
   classifyLedgerNotice,
   decodeSessionLogFile,
   evidenceSatisfied,
@@ -69,6 +70,17 @@ interface RunResult {
     errorText: string
   }[]
   policy: { warnInjections: number; releaseInjections: number; blockedByLedgerCalls: number; samples: string[] }
+  /** Denied calls tallied by the decision-time reason the plugin recorded. */
+  denialBases: Record<string, number>
+  /**
+   * Decision-time truth about task-level false blocks (a denial on a call that
+   * would in fact have succeeded). This collector always reports
+   * `assessed: false`: re-executing a denied call to find out would mutate the
+   * run's workspace, so only a harness with a private counterfactual copy can
+   * answer it. The summarizer must therefore report those denials as
+   * UNASSESSED — never as zero.
+   */
+  decisionTimeTruth: { assessed: boolean; counterfactuallySuccessfulDenials: number | null; reason: string }
   ledger: LedgerSnapshot
   sessionFiles: string[]
   timeoutMs: number
@@ -276,6 +288,12 @@ async function main(): Promise<void> {
     }
   }
   blockedByLedgerCalls = toolCalls.filter(call => call.isError && call.errorText.includes('blocked by negative-ledger')).length
+  const denialBases: Record<string, number> = {}
+  for (const call of toolCalls) {
+    const basis = classifyDenyBasis(call)
+    if (basis === null) continue
+    denialBases[basis] = (denialBases[basis] ?? 0) + 1
+  }
 
   let harnessCommit = 'unknown'
   try {
@@ -313,6 +331,12 @@ async function main(): Promise<void> {
       errorText: cap(call.errorText, 600),
     })),
     policy: { warnInjections, releaseInjections, blockedByLedgerCalls, samples },
+    denialBases,
+    decisionTimeTruth: {
+      assessed: false,
+      counterfactuallySuccessfulDenials: null,
+      reason: 'this collector runs no counterfactual probe against the workspace; task-level false blocks are unassessed',
+    },
     ledger: snapshotLedger(join(ledgerDir, 'ledger.db')),
     sessionFiles: copies,
     timeoutMs: scenario.timeoutMs,

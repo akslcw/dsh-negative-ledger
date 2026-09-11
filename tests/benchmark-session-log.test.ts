@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import {
+  classifyDenyBasis,
   classifyLedgerNotice,
   evidenceSatisfied,
   extractToolCalls,
@@ -55,6 +56,44 @@ describe('benchmark ledger notice classification', () => {
     for (const message of [null, {}, { content: [{ text: oldWarn }] }]) {
       assert.equal(classifyLedgerNotice(message), null)
     }
+  })
+})
+
+describe('benchmark deny basis classification', () => {
+  const deny = (suffix: string): { isError: boolean; errorText: string } =>
+    ({ isError: true, errorText: `blocked by negative-ledger (command_failed): command exited 1 (bash) [npm test] — ${suffix}` })
+  const cooldown = ' Retry cooldown until 2026-08-23T00:00:05.000Z; after expiry a verification retry is permitted.'
+  // The wording before and after the recovery-message change: a batch collected
+  // under either must classify the same way.
+  const oldUnchanged = deny(`Observed preconditions still match.${cooldown}`)
+  const oldIncomplete = deny(`Current precondition evidence is incomplete; no change has been confirmed.${cooldown}`)
+  const newExpired = deny('Current precondition evidence is incomplete; no change has been confirmed — the recorded observation of /ws/config.json is no longer fresh. '
+    + `Re-reading those files may confirm a change and enable an early retry; unchanged files leave the cooldown in place.${cooldown}`)
+  const newUnknown = deny('Current precondition evidence is incomplete; no change has been confirmed — no observation of /ws/config.json was recorded in this context. '
+    + `Re-reading those files may confirm a change and enable an early retry; unchanged files leave the cooldown in place.${cooldown}`)
+  const newNoWitness = deny('No precondition evidence was recorded with this failure, so re-reading files cannot release the retry early; the cooldown stands.'
+    + cooldown)
+
+  it('separates re-checked-and-unchanged from could-not-verify', () => {
+    assert.equal(classifyDenyBasis(oldUnchanged), 'evidence-unchanged')
+    for (const text of [oldIncomplete, newExpired, newUnknown]) {
+      assert.equal(classifyDenyBasis(text), 'evidence-incomplete')
+    }
+  })
+
+  it('classifies the missing-historical-witness reason as its own basis', () => {
+    assert.equal(classifyDenyBasis(newNoWitness), 'no-evidence-recorded')
+  })
+
+  it('classifies lease and store denials, and leaves non-ledger failures alone', () => {
+    assert.equal(classifyDenyBasis({ isError: true, errorText: 'blocked by negative-ledger: verification retry already in progress by owner-1 (until 2026-08-23T00:01:00.000Z)' }), 'lease-in-progress')
+    assert.equal(classifyDenyBasis({ isError: true, errorText: 'blocked by negative-ledger: store unavailable (fail-closed)' }), 'store-unavailable')
+    assert.equal(classifyDenyBasis({ isError: true, errorText: '[exit code: 1]' }), null)
+    assert.equal(classifyDenyBasis({ isError: false, errorText: 'blocked by negative-ledger (command_failed)' }), null)
+  })
+
+  it('keeps an unrecognized ledger reason auditable instead of guessing', () => {
+    assert.equal(classifyDenyBasis({ isError: true, errorText: 'blocked by negative-ledger (command_failed): some future reason' }), 'unclassified')
   })
 })
 

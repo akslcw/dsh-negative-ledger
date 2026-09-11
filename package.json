@@ -48,6 +48,7 @@
     "cli": "node src/cli.ts",
     "smoke": "node smoke/real-mount.ts",
     "smoke:real-dsh": "node smoke/real-dsh-p2.ts",
+    "smoke:task-trials": "node smoke/task-trials.ts",
     "pack-test": "node smoke/packed-consumer.mjs",
     "prepack": "npm run build"
   },

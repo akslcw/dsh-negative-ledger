@@ -187,6 +187,46 @@ export function isBlocked(call: Pick<CallOutcome, 'isError' | 'errorText'>): boo
   return call.isError && call.errorText.includes('blocked by negative-ledger')
 }
 
+/**
+ * Why the ledger denied a call, according to the decision-time reason it wrote
+ * into the call's error text.
+ *
+ * The fragments matched here are deliberately stable across wording revisions
+ * (they are asserted by tests/command-dependencies.test.ts and
+ * tests/retry-contract.test.ts), so a batch collected before a rewording
+ * classifies the same way as one collected after it.
+ */
+export type DenyBasis =
+  | 'evidence-unchanged'
+  | 'evidence-incomplete'
+  | 'no-evidence-recorded'
+  | 'lease-in-progress'
+  | 'store-unavailable'
+  | 'unclassified'
+
+/**
+ * Classify one denied call by its recorded reason, or `null` when the call was
+ * not a ledger denial.
+ *
+ * This is decision-time evidence about WHY the plugin blocked, never a verdict
+ * that the block was wrong: `evidence-unchanged` means the plugin re-checked
+ * the recorded preconditions and found them equal, while `evidence-incomplete`
+ * and `no-evidence-recorded` mean it could not verify at all — those are the
+ * denials a decision-time counterfactual could still show to be task-level
+ * false blocks, and only such a probe (which this collector does not run) can
+ * decide it.
+ */
+export function classifyDenyBasis(call: Pick<CallOutcome, 'isError' | 'errorText'>): DenyBasis | null {
+  if (!isBlocked(call)) return null
+  const text = call.errorText
+  if (text.includes('verification retry already in progress')) return 'lease-in-progress'
+  if (text.includes('store unavailable (fail-closed)')) return 'store-unavailable'
+  if (text.includes('No precondition evidence was recorded')) return 'no-evidence-recorded'
+  if (text.includes('no change has been confirmed')) return 'evidence-incomplete'
+  if (text.includes('Observed preconditions still match')) return 'evidence-unchanged'
+  return 'unclassified'
+}
+
 /** Whether a call matches a scenario's declared allow/never-deny entry. */
 export function matchesAllow(call: Pick<CallOutcome, 'name' | 'args'>, entry: AllowEntry): boolean {
   if (call.name !== entry.tool) return false
