@@ -6,7 +6,7 @@
 // use inherited stdio (exit codes carry the verdict), so this also runs in
 // piped-stdio-restricted sandboxes.
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -59,6 +59,16 @@ try {
   const patch = readFileSync(join(pkgRoot, 'cordis.patch.yml'), 'utf8')
   if (!patch.includes("name: '@akslcw/dsh-negative-ledger'")) throw new Error('bundle patch does not mount the plugin row')
   console.log('consumer bundle layer ok')
+  // P2 wiring: the driver is copied INTO the consumer so its bare import of
+  // the package resolves to the packed install, never to the repo sources.
+  const driver = 'packed-consumer-p2.mjs'
+  copyFileSync(join(repoRoot, 'smoke', driver), join(consumer, driver))
+  execFileSync(process.execPath, [
+    join(consumer, driver),
+    consumer,
+    join(consumer, 'ledger-p2'),
+    join(consumer, 'workspace'),
+  ], { stdio: 'inherit' })
   console.log('pack-test ok')
 } finally {
   rmSync(tarball, { force: true })
