@@ -20,18 +20,31 @@
 // Usage: node packed-consumer-p2.mjs <consumerDir> <ledgerDir> <workspace>
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { isAbsolute, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { apply, SqliteLedgerStore } from '@akslcw/dsh-negative-ledger'
+
+// Containment must compare real directories, not spellings: on macOS `/var` is
+// `/private/var` (and a symlinked `TMPDIR` does the same on Linux), so a module
+// that IS inside the install would otherwise read as an escape. `realpathSync`
+// fails on a missing path rather than accepting an unverified spelling.
+const canonical = path => realpathSync.native(path)
+// Component-wise, so a sibling sharing a name prefix (`…/consumer-evil` for
+// `…/consumer`) is rejected too — a raw `startsWith` would accept it.
+const isInside = (root, target) => {
+  const inside = relative(root, target)
+  return inside !== '' && !inside.startsWith('..') && !isAbsolute(inside)
+}
 
 const [consumerDir, ledgerDir, workspace] = process.argv.slice(2)
 if (consumerDir === undefined || ledgerDir === undefined || workspace === undefined) {
   throw new Error('usage: packed-consumer-p2.mjs <consumerDir> <ledgerDir> <workspace>')
 }
 const entry = fileURLToPath(import.meta.resolve('@akslcw/dsh-negative-ledger'))
-assert.ok(!relative(consumerDir, entry).startsWith('..'),
-  `this driver must import the packed install, resolved ${entry}`)
+const installedRoot = join(consumerDir, 'node_modules', '@akslcw', 'dsh-negative-ledger')
+assert.ok(isInside(canonical(installedRoot), canonical(entry)),
+  `this driver must import the packed install under ${installedRoot}, resolved ${entry}`)
 
 // --- real probe -------------------------------------------------------------
 
