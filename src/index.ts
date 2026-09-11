@@ -26,6 +26,7 @@ export { runCli } from './cli.ts'
 export type { CliResult } from './cli.ts'
 export { apply, createLedgerPolicy, name, inject } from './plugin.ts'
 export type {
+  CommandDependency,
   Config,
   ContextMessage,
   DshContextLike,

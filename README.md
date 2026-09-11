@@ -115,6 +115,33 @@ Security posture:
 
 Boundary with `repeat-tool-reminder`: that guard nudges on byte-identical consecutive repeats within one session; the ledger is persistent, evidence-bound, and auto-invalidating across sessions.
 
+## Retry decisions and warning frequency
+
+Without configured dependencies and a complete fresh pre-dispatch observation snapshot, command failures carry only outcomes and a cooldown. A repaired file then cannot unlock a command before TTL expiry in block mode. Messages now describe the recorded cooldown and distinguish missing preconditions from incomplete or matching current evidence. The conservative verdict for unknown evidence is unchanged.
+
+`warningRepeatAfterMs` defaults to `60000`; `0` disables suppression for text-only evaluation. Repeated advisories are limited per policy instance, session, and fact. Changed failure evidence, interval expiry, or an allowed verification permits another warning. The in-memory cache holds at most 256 entries per session; sessions remain independent and denial reasons are always returned.
+
+Warnings no longer carry cumulative totals; use CLI `stats`. Suppressed repeats still increment `duplicateFailuresObserved`, while only attached repeat advisories increment `warningsEmitted`. No online cost improvement is claimed. See the development [retry contract](RETRY-CONTRACT.md) for validation and the P2 boundary.
+
+## Explicit command dependencies
+
+Add trusted rules to the plugin `config` to permit verification after observed dependency changes:
+
+```yaml
+commandEvidenceMaxAgeMs: 60000
+commandDependencies:
+  - tool: bash
+    commandLine: npm test
+    cwd: /workspace/my-project
+    files:
+      - /workspace/my-project/package.json
+      - /workspace/my-project/test.config.js
+```
+
+Tool, full command text, and effective cwd must match exactly. Files are absolute DSH `displayPath` values; no globbing or shell dependency inference is performed. All dependencies need `fs/observed` observations before execution. A declaration is not an observation. Received observations older than `commandEvidenceMaxAgeMs` (default 60 seconds) are unknown; the policy falls back to TTL. No extra filesystem reads or hashing are performed.
+
+Failure records use pre-dispatch evidence, never retroactively captured observations. A fresh changed dependency permits verification, while unrelated changes do not. Only successful execution resolves the fact. Another process or restarted policy needs its own observations. With no rules, existing command behavior is preserved.
+
 ## Known limitations and deferred work
 
 - **Single-writer JSONL (legacy)**: `backend: jsonl` keeps the v0 single-process store for migrations and debugging; concurrent multi-process writers are unsupported there. The default `backend: sqlite` is the transactional WAL store with unique indexes, idempotent operation receipts, and crash recovery.

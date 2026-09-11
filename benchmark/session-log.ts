@@ -115,6 +115,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
+/** Classify ledger notices across wording changes; structured summaries take priority. */
+export function classifyLedgerNotice(message: unknown): 'warn' | 'release' | null {
+  if (!isRecord(message) || !isRecord(message.source) || message.source.plugin !== 'negative-ledger') return null
+  const summary = message.source.summary
+  if (summary !== undefined) {
+    if (typeof summary !== 'string') return null
+    const match = /^(command_failed|file_missing|approach_rejected|api_unavailable) (repeat|evidence changed)$/.exec(summary)
+    return match === null ? null : match[2] === 'repeat' ? 'warn' : 'release'
+  }
+  const text = Array.isArray(message.content)
+    ? message.content.map(block => isRecord(block) && typeof block.text === 'string' ? block.text : '').join(' ')
+    : ''
+  if (text.startsWith('Negative-ledger: another agent is verifying this path')) return null
+  if (text.includes('previously failed and its evidence is unchanged')
+    || text.startsWith('Negative-ledger: this action previously failed. Advisory only; this call was not blocked.')) return 'warn'
+  if (text.includes('no longer applies')
+    || text.startsWith('Negative-ledger: recorded preconditions changed; verification is allowed, but success is not guaranteed.')) return 'release'
+  return null
+}
+
 /** One executed tool call, joined from a tool/call event. */
 export interface ToolCallRecord {
   callId: string

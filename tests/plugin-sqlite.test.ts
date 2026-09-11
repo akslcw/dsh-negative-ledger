@@ -58,7 +58,7 @@ describe('plugin over the SQLite store', () => {
     assert.deepEqual(await policyA.postExecute(exec, bashFail(1)), [])
     const contexts = await policyA.postExecute(exec, bashFail(1))
     assert.equal(contexts.length, 1)
-    assert.ok(contexts[0]?.content[0]?.text.includes('1 duplicate failure(s) observed'))
+    assert.ok(contexts[0]?.content[0]?.text.includes('Retry cooldown until'))
     assert.deepEqual(await storeA.summarize(), {
       factsHit: 1,
       duplicateFailuresObserved: 1,

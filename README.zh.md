@@ -114,6 +114,33 @@ node src/cli.ts [--dir <path>] [--backend sqlite|jsonl] <list | show <id> | stal
 
 与 `repeat-tool-reminder` 的边界：它是对会话内连续字节级重复的临时提醒；本账本是跨会话、绑定证据、自动失效的持久知识。
 
+## 重试判定与提醒频率
+
+未配置命令依赖，或缺少完整、新鲜的执行前观察时，命令失败只记录失败结果与冷却时间；此时即使文件已修复，也要等 TTL 到期才能在 block 模式下重试。提示会明确说明依据和冷却到期时间，不再把缺少证据称为“证据未变”。文件事实的当前证据缺失仍沿用保守裁决，但提示明确标为不完整。
+
+`warningRepeatAfterMs` 默认 `60000`：同一策略实例、会话和事实的重复提醒在该间隔内去重；设为 `0` 可关闭去重，单独评估提示文案。失败证据改变、间隔到期或合法验证重试会允许再次提醒。去重仅保存在内存，每个会话最多 256 条；其他会话独立提醒，block 拒绝原因始终返回。
+
+提醒不再附带累计统计；使用 CLI `stats` 查看。被去重的重复失败仍计入 `duplicateFailuresObserved`，只有实际附加的重复提醒增加 `warningsEmitted`。这一变化尚未进行在线成本实验，不能据此宣称节省 token。开发验收与 P2 边界见 [重试契约](RETRY-CONTRACT.md)。
+
+## 显式命令依赖
+
+可在插件 `config` 中加入以下配置，让已观察的依赖变化允许提前验证重试：
+
+```yaml
+commandEvidenceMaxAgeMs: 60000
+commandDependencies:
+  - tool: bash
+    commandLine: npm test
+    cwd: /workspace/my-project
+    files:
+      - /workspace/my-project/package.json
+      - /workspace/my-project/test.config.js
+```
+
+`tool`、完整命令文本和有效 `cwd` 必须精确匹配；`files` 使用 DSH 的绝对 `displayPath`，不支持 glob 或自动解析 shell。必须在命令执行前收到全部依赖的 `fs/observed`；声明文件不等于已经观察。观察接收超过 `commandEvidenceMaxAgeMs`（默认 60 秒）视为未知，继续使用 TTL。插件不增加文件读取或哈希。
+
+失败记录保存执行前的观察快照；执行中或执行后才观察到的状态不会回填到这次快照。相关依赖新观察发生变化时允许验证，无关文件变化不影响；允许验证不代表成功，只有成功执行才标为 resolved。其他进程和重启后的实例需要重新接收观察。未配置时保持原行为。
+
 ## 已知限制与后续
 
 - **单写者 JSONL（旧版）**：`backend: jsonl` 保留 v0 单进程存储，供迁移与调试；该后端不支持多进程并发写。默认的 `backend: sqlite` 是事务性 WAL 存储，带唯一索引、幂等操作收据与崩溃恢复。

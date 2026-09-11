@@ -28,9 +28,9 @@ node apps/cli/lib/bin.js --profile headless --patch dsh-negative-ledger/smoke/sm
 | 观察点 | 期待的现象 | 说明 |
 |---|---|---|
 | 第 1 次 read 失败 | 结果卡片只有 `FS_NOT_FOUND` 错误，**无** Negative-ledger 附言 | 首次失败只记录，不打扰 |
-| 第 2 次 read 失败 | 警告经 `agent/inbox/spliced` 注入**下一步输入**（session log 里 source 为 `{kind:'plugin', plugin:'negative-ledger'}`），含 `Negative-ledger: this exact action previously failed...` 与诚实计数行 | 附言不进结果卡片，而是在下一步请求里对模型可见 |
+| 第 2 次 read 失败 | 警告经 `agent/inbox/spliced` 注入**下一步输入**（session log 里 source 为 `{kind:'plugin', plugin:'negative-ledger'}`），含 `Negative-ledger: this action previously failed...`，累计计数改用 CLI `stats` 查看 | 附言不进结果卡片，而是在下一步请求里对模型可见 |
 | 第 3 步 write | 无拦截（write 不受 readTools 跟踪） | 但 write 的 `fs/observed` 会触发失效 |
-| 第 4 次 read 成功 | 出现 `a previous failure no longer applies... retry is allowed`（同样经 inbox 注入） | 证据变化→stale→lease→成功→resolved |
+| 第 4 次 read 成功 | 出现 `recorded preconditions changed; verification is allowed...`（同样经 inbox 注入） | 证据变化→stale→lease→成功→resolved |
 | 模型是否改变行为 | 真实模型可能不按脚本顺序走——已观察过它把两次 read 放进同一并行 step，或提醒后直接改走 write | 并行调用同样正确处理：先到的结果记录，后到的命中提醒 |
 
 ## 3. 事后核验（确定性断言，不依赖模型表现）

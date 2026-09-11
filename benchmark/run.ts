@@ -16,6 +16,7 @@ import { spawn, execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import Database from 'better-sqlite3'
 import {
+  classifyLedgerNotice,
   decodeSessionLogFile,
   evidenceSatisfied,
   extractToolCalls,
@@ -267,8 +268,9 @@ async function main(): Promise<void> {
               .filter((part): part is string => typeof part === 'string')
               .join(' ')
           : ''
-        if (text.includes('previously failed and its evidence is unchanged')) warnInjections += 1
-        else if (text.includes('no longer applies')) releaseInjections += 1
+        const notice = classifyLedgerNotice(item)
+        if (notice === 'warn') warnInjections += 1
+        else if (notice === 'release') releaseInjections += 1
         if (samples.length < 3) samples.push(cap(text.slice(0, 300) || JSON.stringify(item).slice(0, 300), 300))
       }
     }

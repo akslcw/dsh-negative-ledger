@@ -135,9 +135,11 @@ try {
     'second repeat must warn the model')
   assert.ok(requestText(adapter.requests[2]!).includes('file does not exist: missing.txt'),
     'warning must carry the claim')
-  assert.ok(requestText(adapter.requests[2]!).includes('1 duplicate failure(s) observed'),
-    'warning must carry the honest counters line')
-  assert.ok(requestText(adapter.requests[4]!).includes('retry is allowed'),
+  assert.ok(requestText(adapter.requests[2]!).includes('Advisory only; this call was not blocked'),
+    'warning must describe its advisory status')
+  assert.ok(!requestText(adapter.requests[2]!).includes('Ledger totals:'),
+    'cumulative counters belong in stats, not model context')
+  assert.ok(requestText(adapter.requests[4]!).includes('verification is allowed'),
     'evidence change must withdraw the warning and allow the retry')
 
   // The ledger (default sqlite backend) must hold one logical fact, resolved

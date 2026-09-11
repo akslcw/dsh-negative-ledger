@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import {
+  classifyLedgerNotice,
   evidenceSatisfied,
   extractToolCalls,
   extractToolResultTexts,
@@ -9,6 +10,53 @@ import {
 } from '../benchmark/session-log.ts'
 import { resolveScenario } from '../benchmark/resolve.ts'
 import type { ScenarioSource } from '../benchmark/resolve.ts'
+
+describe('benchmark ledger notice classification', () => {
+  const oldWarn = 'Negative-ledger: this action previously failed and its evidence is unchanged.'
+  const oldRelease = 'Negative-ledger: this failure no longer applies.'
+  const newWarn = 'Negative-ledger: this action previously failed. Advisory only; this call was not blocked.'
+  const newRelease = 'Negative-ledger: recorded preconditions changed; verification is allowed, but success is not guaranteed.'
+  const notice = (text: string, summary?: unknown, plugin = 'negative-ledger'): unknown => ({
+    source: { plugin, ...(summary === undefined ? {} : { summary }) },
+    content: [{ type: 'text', text }],
+  })
+
+  it('recognizes old and new wording when no summary is present', () => {
+    for (const text of [oldWarn, newWarn]) assert.equal(classifyLedgerNotice(notice(text)), 'warn')
+    for (const text of [oldRelease, newRelease]) assert.equal(classifyLedgerNotice(notice(text)), 'release')
+  })
+
+  it('uses all four known fact summaries regardless of wording', () => {
+    for (const kind of ['command_failed', 'file_missing', 'approach_rejected', 'api_unavailable']) {
+      for (const text of [oldWarn, newWarn, 'changed wording', oldRelease]) {
+        assert.equal(classifyLedgerNotice(notice(text, `${kind} repeat`)), 'warn')
+      }
+      for (const text of [oldRelease, newRelease, 'changed wording', oldWarn]) {
+        assert.equal(classifyLedgerNotice(notice(text, `${kind} evidence changed`)), 'release')
+      }
+    }
+  })
+
+  it('does not fall back for unknown or malformed summaries', () => {
+    for (const summary of ['', null, 42, 'unknown repeat', 'command_failed repeat extra', 'verification in progress']) {
+      for (const text of [oldWarn, oldRelease]) assert.equal(classifyLedgerNotice(notice(text, summary)), null)
+    }
+  })
+
+  it('excludes in-progress advisories and other plugins', () => {
+    const inProgress = 'Negative-ledger: another agent is verifying this path (owner test until tomorrow); wait for its result.'
+    assert.equal(classifyLedgerNotice(notice(inProgress, 'verification in progress')), null)
+    assert.equal(classifyLedgerNotice(notice(inProgress)), null)
+    for (const text of [oldWarn, oldRelease, newWarn, newRelease]) {
+      for (const summary of [undefined, 'command_failed repeat', 'command_failed evidence changed']) {
+        assert.equal(classifyLedgerNotice(notice(text, summary, 'other-plugin')), null)
+      }
+    }
+    for (const message of [null, {}, { content: [{ text: oldWarn }] }]) {
+      assert.equal(classifyLedgerNotice(message), null)
+    }
+  })
+})
 
 function assistantEvent(blocks: Array<{ type: string; text?: string; id?: string; name?: string }>): Record<string, unknown> {
   return { type: 'assistant/message', data: { message: { role: 'assistant', content: blocks } } }

@@ -69,8 +69,10 @@ describe('warn mode (default)', () => {
     assert.ok(text.includes('Negative-ledger'))
     assert.ok(text.includes('command exited 1 (bash)'))
     assert.ok(text.includes('action preview: npm install'))
-    assert.ok(text.includes('1 duplicate failure(s) observed'))
-    assert.ok(text.includes('1 warning(s) emitted'))
+    assert.ok(text.includes('Retry cooldown until'))
+    assert.ok(text.includes('No precondition evidence was recorded'))
+    assert.ok(!text.includes('Ledger totals'))
+    assert.ok(!text.includes('evidence is unchanged'))
     assert.equal(contexts[0]?.source.kind, 'plugin')
     assert.equal(contexts[0]?.source.plugin, 'negative-ledger')
     assert.deepEqual(await fixture.store.summarize(), {
@@ -107,10 +109,10 @@ describe('block mode', () => {
     const exec = bashExec('npm install')
     await fixture.policy.postExecute(exec, bashFail(1))
     const outcome = await fixture.policy.preExecute(exec)
-    assert.deepEqual(outcome, {
-      kind: 'deny',
-      reason: 'blocked by negative-ledger (command_failed): command exited 1 (bash) [npm install] — retry condition not met',
-    })
+    assert.equal(outcome?.kind, 'deny')
+    const fact = (await fixture.store.queryFacts())[0]!.fact
+    assert.ok(fact.retryCondition?.type === 'after')
+    assert.ok(outcome?.kind === 'deny' && outcome.reason.includes(fact.retryCondition.at))
     assert.equal((await fixture.store.summarize()).callsDenied, 1)
     assert.equal((await fixture.store.summarize()).warningsEmitted, 0)
     cleanup(fixture)
@@ -160,7 +162,7 @@ describe('block mode', () => {
     assert.equal(await fixture.policy.preExecute(exec), undefined)
     const contexts = await fixture.policy.postExecute(exec, readOk())
     assert.equal(contexts.length, 1)
-    assert.ok(contexts[0]?.content[0]?.text.includes('retry is allowed'))
+    assert.ok(contexts[0]?.content[0]?.text.includes('verification is allowed'))
     assert.equal((await fixture.store.queryFacts())[0]?.fact.status, 'resolved')
     cleanup(fixture)
   })
@@ -314,7 +316,7 @@ describe('audit round fixes', () => {
     }, { operationId: 'seed-2' })
     const outcome = await fixture.policy.preExecute(bashExec('npm lint'))
     assert.equal(outcome?.kind, 'deny')
-    assert.ok(outcome?.kind === 'deny' && outcome.reason.includes('retry condition not met'))
+    assert.ok(outcome?.kind === 'deny' && outcome.reason.includes('explicit manual clearance'))
     cleanup(fixture)
   })
 })

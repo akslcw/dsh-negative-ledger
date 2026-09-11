@@ -19,10 +19,34 @@
  * - Revision conflicts re-read and re-decide (bounded); `unavailable` means
  *   warn-mode proceeds, block-mode denies fail-closed.
  *
+ * P2 command dependencies (declared, never inferred):
+ * - A `commandDependencies` rule matches an invocation only when the tool, the
+ *   command line verbatim, and the effective cwd all match exactly. Its `files`
+ *   are absolute DSH displayPaths; the plugin issues no extra filesystem reads
+ *   and never derives shell dependencies from the command text.
+ * - `preExecute` freezes the newest FRESH observation of every declared file
+ *   (present version or absent) for that call. If any declared file is unknown
+ *   or older than `commandEvidenceMaxAgeMs`, the whole snapshot is dropped and
+ *   the failure keeps its outcome + TTL evidence only.
+ * - `postExecute` never backfills from observations taken after dispatch, and
+ *   a call that never passed pre-execution records no command precondition.
+ * - A call is identified by its session object plus its tool call id. Real
+ *   harnesses issue globally unique ids, so this is belt and braces; the store
+ *   additionally treats a repeated id as an idempotent replay, which is why a
+ *   reused id never rewrites the earlier fact. Without a session object a call
+ *   is identified by its execution object, so two concurrent anonymous
+ *   invocations of one command cannot swap evidence — and a harness that
+ *   passes a different object to post-execute degrades to outcome + TTL.
+ *   Leases and advisory notes key on the same identity.
+ * - Command queries compare against fresh observations only; an expired one is
+ *   unknown, which keeps the TTL verdict instead of allowing an early retry.
+ *   The fingerprint is untouched — dependencies live in the evidence.
+ *
  * @module dsh-negative-ledger/plugin
  */
 
 import { randomUUID } from 'node:crypto'
+import { posix, win32 } from 'node:path'
 import { mismatchedWitnessKinds, retryVerdict } from './pure.ts'
 import { JsonlLedgerStore } from './store-jsonl.ts'
 import { SqliteLedgerStore } from './store-sqlite.ts'
@@ -67,6 +91,27 @@ export interface ContextMessage {
 
 export type PreExecuteOutcome = { kind: 'allow' } | { kind: 'deny'; reason: string }
 
+/**
+ * Declared file dependencies of one exact command invocation. The rule is a
+ * config-time statement of fact (the operator knows the command reads these
+ * files); the plugin does not infer anything from the command text.
+ */
+export interface CommandDependency {
+  /** Tool that runs the command, matched exactly (e.g. `bash`). */
+  tool: string
+  /** The command line as the model wrote it; matched verbatim, no trimming. */
+  commandLine: string
+  /** Effective cwd of the invocation (`workdir` argument or the session cwd). */
+  cwd: string
+  /**
+   * Absolute DSH displayPaths whose observed state the outcome depends on.
+   * Each must have a fresh `fs/observed` entry when the command starts, and
+   * only that exact displayPath is ever used as evidence — never a relative
+   * path alias from another project.
+   */
+  files: string[]
+}
+
 export interface LedgerPolicyConfig {
   /** Enforcement mode. `off` disables interception and recording; default `warn`. */
   mode?: 'off' | 'warn' | 'block'
@@ -80,6 +125,20 @@ export interface LedgerPolicyConfig {
    * cannot lock a command forever on transient failures.
    */
   commandRetryAfterMs?: number
+  /** Repeat warning interval per session/fact (default 60000 ms); 0 disables suppression. */
+  warningRepeatAfterMs?: number
+  /**
+   * Declared file dependencies per exact command invocation. Absent means no
+   * command ever carries precondition evidence (outcome + TTL only).
+   */
+  commandDependencies?: CommandDependency[]
+  /**
+   * Freshness window for `fs/observed` entries used as command evidence
+   * (default 60000 ms). An older observation is treated as unknown: the fact
+   * keeps its TTL verdict rather than being confirmed or withdrawn by stale
+   * information.
+   */
+  commandEvidenceMaxAgeMs?: number
   /** Verification lease TTL (default 60000 ms). */
   leaseTtlMs?: number
   /** Total budget for busy/conflict retries on decisions (default 2000 ms). */
@@ -112,12 +171,89 @@ function nowIso(): string {
   return new Date().toISOString()
 }
 
+/**
+ * Match key of one declared rule: tool, effective cwd, command line verbatim.
+ * JSON encoding rather than a separator join, so no field content (a NUL or an
+ * embedded quote in a command line) can forge a key that matches another rule.
+ */
+function dependencyKey(tool: string, cwd: string, commandLine: string): string {
+  return JSON.stringify([tool, cwd, commandLine])
+}
+
+/**
+ * Absolute-path test for DSH displayPaths. The platform modules do the work:
+ * `win32.isAbsolute` covers drive-letter AND UNC (`\\server\share`) forms,
+ * which a hand-rolled prefix check silently drops on the Windows benchmark
+ * host, while `posix.isAbsolute` covers the POSIX forms.
+ */
+function isAbsoluteDisplayPath(path: string): boolean {
+  return posix.isAbsolute(path) || win32.isAbsolute(path)
+}
+
+/**
+ * Validate and deep-clone the declared rules into a lookup index. Cloning is
+ * what keeps a caller from mutating the policy's matching rules after mount;
+ * duplicate match keys are rejected rather than silently merged, because a
+ * merged rule would widen a command's evidence without anyone deciding to.
+ */
+function parseCommandDependencies(raw: CommandDependency[] | undefined): Map<string, readonly string[]> {
+  const index = new Map<string, readonly string[]>()
+  if (raw === undefined) return index
+  if (!Array.isArray(raw)) throw new Error('negative-ledger: invalid commandDependencies — expected an array of rules')
+  for (const rule of raw as unknown[]) {
+    if (rule === null || typeof rule !== 'object') {
+      throw new Error('negative-ledger: invalid commandDependencies rule — expected an object')
+    }
+    const { tool, commandLine, cwd, files } = rule as Partial<CommandDependency>
+    if (typeof tool !== 'string' || tool === '') {
+      throw new Error('negative-ledger: invalid commandDependencies rule — tool must be a non-empty string')
+    }
+    if (typeof commandLine !== 'string' || commandLine === '') {
+      throw new Error(`negative-ledger: invalid commandDependencies rule for ${tool} — commandLine must be a non-empty string`)
+    }
+    if (typeof cwd !== 'string' || cwd === '') {
+      throw new Error(`negative-ledger: invalid commandDependencies rule for ${tool} — cwd must be a non-empty string`)
+    }
+    if (!Array.isArray(files) || files.length === 0) {
+      throw new Error(`negative-ledger: invalid commandDependencies rule for ${tool} — files must be a non-empty array`)
+    }
+    const cloned: string[] = []
+    for (const file of files as unknown[]) {
+      if (typeof file !== 'string' || file === '') {
+        throw new Error(`negative-ledger: invalid commandDependencies rule for ${tool} — every file must be a non-empty string`)
+      }
+      if (!isAbsoluteDisplayPath(file)) {
+        throw new Error(`negative-ledger: commandDependencies files must be absolute displayPaths: ${file}`)
+      }
+      cloned.push(file)
+    }
+    const key = dependencyKey(tool, cwd, commandLine)
+    if (index.has(key)) {
+      throw new Error(`negative-ledger: duplicate commandDependencies rule for ${tool} in ${cwd}`)
+    }
+    index.set(key, Object.freeze(cloned))
+  }
+  return index
+}
+
 /** One pending attempt resolved to the store's scope + scope-free fingerprint form. */
 interface Attempt {
   kind: FactKind
   scope: string
   fingerprintJson: string
   preconditionNow: PreconditionEvidence[]
+}
+
+/**
+ * Declared dependencies of one command, frozen before dispatch. The identity
+ * fields are re-checked when the snapshot is consumed so a shared anonymous
+ * call key can never attach one invocation's evidence to another's.
+ */
+interface DependencySnapshot {
+  tool: string
+  commandLine: string
+  cwd: string
+  witnesses: PreconditionEvidence[]
 }
 
 /** Lease bookkeeping keyed by the executing tool call. */
@@ -138,6 +274,10 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
   if (!Number.isInteger(commandRetryAfterMs) || commandRetryAfterMs < 1) {
     throw new Error(`negative-ledger: invalid commandRetryAfterMs ${commandRetryAfterMs} — must be an integer >= 1`)
   }
+  const warningRepeatAfterMs = config.warningRepeatAfterMs ?? 60_000
+  if (!Number.isInteger(warningRepeatAfterMs) || warningRepeatAfterMs < 0) {
+    throw new Error(`negative-ledger: invalid warningRepeatAfterMs ${warningRepeatAfterMs} — must be an integer >= 0`)
+  }
   const leaseTtlMs = config.leaseTtlMs ?? 60_000
   if (!Number.isInteger(leaseTtlMs) || leaseTtlMs < 1) {
     throw new Error(`negative-ledger: invalid leaseTtlMs ${leaseTtlMs} — must be an integer >= 1`)
@@ -146,16 +286,49 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
   if (!Number.isInteger(busyDeadlineMs) || busyDeadlineMs < 1) {
     throw new Error(`negative-ledger: invalid storeBusyDeadlineMs ${busyDeadlineMs} — must be an integer >= 1`)
   }
+  const commandEvidenceMaxAgeMs = config.commandEvidenceMaxAgeMs ?? 60_000
+  if (!Number.isInteger(commandEvidenceMaxAgeMs) || commandEvidenceMaxAgeMs < 1) {
+    throw new Error(`negative-ledger: invalid commandEvidenceMaxAgeMs ${commandEvidenceMaxAgeMs} — must be an integer >= 1`)
+  }
+  const commandDependencyIndex = parseCommandDependencies(config.commandDependencies)
   const commandTools = new Set(config.commandTools ?? ['bash', 'pwsh'])
   const readTools = new Set(config.readTools ?? ['read'])
-  /** Latest `fs/observed` value per observation key (plugin-local cache). */
-  const observed = new Map<string, FsObservationLike>()
+  /** Latest `fs/observed` value per observation key, with its receipt time (freshness). */
+  const observed = new Map<string, { observation: FsObservationLike; at: number }>()
   /** Model-supplied path → backend displayPath, from the actor correlation. */
   const displayByModel = new Map<string, string>()
   /** Active verification leases granted to THIS policy instance's calls. */
   const leases = new Map<string, LeaseGrant>()
   /** In-progress advisories for calls that lost the lease competition. */
   const inProgressNotes = new Map<string, { owner: string; expiresAt: string }>()
+  /**
+   * Pre-dispatch dependency snapshots (see {@link DependencySnapshot}), keyed
+   * by SESSION OBJECT and then by call identity. A tool call id is only unique
+   * within the session that issued it, so the session must be part of the key:
+   * two sessions reusing one id for the same command would otherwise swap
+   * evidence. Only `freezeCommandDependencies` writes here, which is what makes
+   * post-execution backfill structurally impossible.
+   */
+  const sessionDependencySnapshots = new WeakMap<object, Map<string, DependencySnapshot>>()
+  /**
+   * Snapshots of calls that carry no session object, keyed by execution object
+   * identity. A harness that hands post-execute a different object finds
+   * nothing and safely degrades to outcome + TTL.
+   */
+  const anonymousDependencySnapshots = new WeakMap<object, DependencySnapshot>()
+  // Session objects are runtime identities, not persisted facts. Anonymous callers
+  // share a policy-local bucket. Bound each bucket; eviction only adds a warning.
+  type WarningStamp = { signature: string; at: number; settled: Promise<void> }
+  const sessionWarnings = new WeakMap<object, Map<string, WarningStamp>>()
+  const anonymousWarnings = new Map<string, WarningStamp>()
+  function warningBucket(exec: ExecLike): Map<string, WarningStamp> {
+    const owner = exec.agent?.session ?? exec.agent
+    if (owner === undefined) return anonymousWarnings
+    let bucket = sessionWarnings.get(owner)
+    if (bucket === undefined) { bucket = new Map(); sessionWarnings.set(owner, bucket) }
+    return bucket
+  }
+
   /**
    * Controlled queue for background operations (fs/observed invalidation
    * passes). Every task chains onto the previous one, rejections are captured
@@ -174,8 +347,28 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
     return commandTools.has(name) || readTools.has(name)
   }
 
+  /**
+   * Per-execution identity for lease and advisory bookkeeping. A call with a
+   * tool call id keeps using it — that is the value the store records as the
+   * lease owner. A call WITHOUT one is identified by its execution object:
+   * keying those by tool name would let two concurrent anonymous commands share
+   * one entry, so one call's settlement would resolve the other's fact.
+   */
+  const anonymousCallKeys = new WeakMap<object, string>()
   function callKey(exec: ExecLike): string {
-    return exec.callId ?? `anon:${exec.name}`
+    if (exec.callId !== undefined) return exec.callId
+    let key = anonymousCallKeys.get(exec)
+    if (key === undefined) { key = `anon:${randomUUID()}`; anonymousCallKeys.set(exec, key) }
+    return key
+  }
+
+  /** The session-scoped snapshot bucket of a call, or undefined without a session. */
+  function dependencyBucket(exec: ExecLike): Map<string, DependencySnapshot> | undefined {
+    const owner = exec.agent?.session ?? exec.agent
+    if (owner === undefined) return undefined
+    let bucket = sessionDependencySnapshots.get(owner)
+    if (bucket === undefined) { bucket = new Map(); sessionDependencySnapshots.set(owner, bucket) }
+    return bucket
   }
 
   function opMeta(exec: ExecLike): OperationMeta {
@@ -222,17 +415,95 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
     return workdir ?? exec.agent?.session?.header?.cwd ?? ''
   }
 
-  /** All cached observations as precondition evidence for witness comparison. */
-  function currentPreconditions(): PreconditionEvidence[] {
+  /**
+   * Cached observations as precondition evidence for witness comparison. With
+   * `maxAgeMs` the set is restricted to fresh entries: an expired observation
+   * is unknown, so it neither confirms nor withdraws a fact.
+   */
+  function currentPreconditions(maxAgeMs?: number): PreconditionEvidence[] {
+    const cutoff = maxAgeMs === undefined ? undefined : Date.now() - maxAgeMs
     const preconditions: PreconditionEvidence[] = []
-    for (const [key, observation] of observed) {
-      if (observation.kind === 'present') {
-        preconditions.push({ role: 'precondition', kind: 'file-state', path: key, observed: 'present', version: observation.version })
-      } else {
-        preconditions.push({ role: 'precondition', kind: 'file-state', path: key, observed: 'absent' })
-      }
+    for (const [key, cached] of observed) {
+      if (cutoff !== undefined && cached.at < cutoff) continue
+      preconditions.push(cached.observation.kind === 'present'
+        ? { role: 'precondition', kind: 'file-state', path: key, observed: 'present', version: cached.observation.version }
+        : { role: 'precondition', kind: 'file-state', path: key, observed: 'absent' })
     }
     return preconditions
+  }
+
+  /** The newest fresh observation of one displayPath, if any. */
+  function freshObservation(displayPath: string): FsObservationLike | undefined {
+    const cached = observed.get(displayPath)
+    if (cached === undefined) return undefined
+    if (Date.now() - cached.at > commandEvidenceMaxAgeMs) return undefined
+    return cached.observation
+  }
+
+  /** Declared dependency files for this invocation, or undefined when no rule matches. */
+  function matchedDependencyFiles(exec: ExecLike): readonly string[] | undefined {
+    if (!commandTools.has(exec.name)) return undefined
+    const args = argsOf(exec)
+    if (args === null || typeof args.command !== 'string' || args.command === '') return undefined
+    return commandDependencyIndex.get(dependencyKey(exec.name, execCwd(exec), args.command))
+  }
+
+  /**
+   * Freeze the declared dependencies of one command BEFORE it is dispatched.
+   * All-or-nothing: a single unknown or expired file drops the whole snapshot,
+   * so a partially observed command never claims evidence it does not have.
+   */
+  function freezeCommandDependencies(exec: ExecLike): void {
+    // Clear this call's previous snapshot FIRST: a reused call identity must
+    // never keep older evidence alive across an early return below.
+    const bucket = dependencyBucket(exec)
+    const key = callKey(exec)
+    if (bucket === undefined) anonymousDependencySnapshots.delete(exec)
+    else bucket.delete(key)
+    const files = matchedDependencyFiles(exec)
+    if (files === undefined) return
+    const args = argsOf(exec)
+    if (args === null || typeof args.command !== 'string') return
+    const witnesses: PreconditionEvidence[] = []
+    for (const file of files) {
+      const observation = freshObservation(file)
+      if (observation === undefined) return
+      witnesses.push(observation.kind === 'present'
+        ? { role: 'precondition', kind: 'file-state', path: file, observed: 'present', version: observation.version }
+        : { role: 'precondition', kind: 'file-state', path: file, observed: 'absent' })
+    }
+    const snapshot: DependencySnapshot = { tool: exec.name, commandLine: args.command, cwd: execCwd(exec), witnesses }
+    if (bucket === undefined) {
+      // No session object: the execution OBJECT is the only identity available.
+      anonymousDependencySnapshots.set(exec, snapshot)
+      return
+    }
+    bucket.set(key, snapshot)
+    if (bucket.size > 256) bucket.delete(bucket.keys().next().value!)
+  }
+
+  /**
+   * Consume the frozen snapshot of this call, exactly once. The snapshot must
+   * still describe the invocation settling now (same tool, command line, and
+   * cwd), so neither an anonymous object swap nor a recycled call id can
+   * attach one command's evidence to another's.
+   */
+  function takeCommandPreconditions(exec: ExecLike): PreconditionEvidence[] {
+    let snapshot: DependencySnapshot | undefined
+    const bucket = dependencyBucket(exec)
+    if (bucket === undefined) {
+      snapshot = anonymousDependencySnapshots.get(exec)
+      if (snapshot !== undefined) anonymousDependencySnapshots.delete(exec)
+    } else {
+      const key = callKey(exec)
+      snapshot = bucket.get(key)
+      if (snapshot !== undefined) bucket.delete(key)
+    }
+    if (snapshot === undefined) return []
+    const args = argsOf(exec)
+    if (args === null || typeof args.command !== 'string') return []
+    if (snapshot.tool !== exec.name || snapshot.commandLine !== args.command || snapshot.cwd !== execCwd(exec)) return []
+    return snapshot.witnesses
   }
 
   function attemptFor(exec: ExecLike): Attempt | undefined {
@@ -244,7 +515,9 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
         kind: 'command_failed',
         scope: execCwd(exec),
         fingerprintJson: JSON.stringify({ kind: 'command_failed', tool: exec.name, commandLine: args.command }),
-        preconditionNow: currentPreconditions(),
+        // Command facts compare against FRESH observations only: an expired
+        // dependency is unknown, so the TTL verdict stands unchanged.
+        preconditionNow: currentPreconditions(commandEvidenceMaxAgeMs),
       }
     }
     if (readTools.has(exec.name)) {
@@ -259,8 +532,12 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
     return undefined
   }
 
-  /** Detect the failure a settled call proves, if any, as a store FactInput. */
-  function failureToRecord(exec: ExecLike, result: ResultLike): FactInput | undefined {
+  /**
+   * Detect the failure a settled call proves, if any, as a store FactInput.
+   * `dependencyWitnesses` are the pre-dispatch command snapshot (empty when
+   * the invocation declared no dependency or its snapshot was incomplete).
+   */
+  function failureToRecord(exec: ExecLike, result: ResultLike, dependencyWitnesses: PreconditionEvidence[]): FactInput | undefined {
     const args = argsOf(exec)
     if (args === null) return undefined
     if (commandTools.has(exec.name)) {
@@ -276,7 +553,10 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
         scope: execCwd(exec),
         fingerprint: JSON.stringify({ kind: 'command_failed', tool: exec.name, commandLine: args.command }),
         claim: `command exited ${exitCode} (${exec.name})`,
-        evidence: [{ role: 'outcome', kind: 'command-exit', exitCode, stderrSignature: stderrText }],
+        evidence: [
+          { role: 'outcome', kind: 'command-exit', exitCode, stderrSignature: stderrText },
+          ...dependencyWitnesses,
+        ],
         retryCondition: { type: 'after', at: new Date(Date.now() + commandRetryAfterMs).toISOString() },
       }
     }
@@ -360,18 +640,39 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
     }
   }
 
-  async function warnMessage(fact: NegativeFact): Promise<ContextMessage> {
-    const stats = await store.summarize()
+  function retryExplanation(fact: NegativeFact, current: PreconditionEvidence[]): string {
+    const witnesses = fact.evidence.filter(e => e.role === 'precondition')
+    const key = (e: PreconditionEvidence): string => {
+      if ('path' in e) return `${e.kind}:${e.path}`
+      if ('key' in e) return `${e.kind}:${e.key}`
+      return `${e.kind}:${e.root}`
+    }
+    const known = new Set(current.map(key))
+    const evidence = witnesses.length === 0
+      ? 'No precondition evidence was recorded.'
+      : witnesses.some(e => !known.has(key(e)))
+        ? 'Current precondition evidence is incomplete; no change has been confirmed.'
+        : 'Observed preconditions still match.'
+    const condition = fact.retryCondition
+    const retry = condition?.type === 'after'
+      ? `Retry cooldown until ${sanitize(condition.at)}; after expiry a verification retry is permitted.`
+      : condition?.type === 'manual'
+        ? 'Retry requires explicit manual clearance or a confirmed precondition change.'
+        : condition?.type === 'never'
+          ? 'Retry is disabled by the recorded condition unless a precondition changes.'
+          : condition?.type === 'anyOf'
+            ? 'No alternative retry condition is satisfied; a confirmed precondition change also permits verification.'
+            : 'A confirmed precondition change permits verification.'
+    return `${evidence} ${retry}`
+  }
+
+  function warnMessage(fact: NegativeFact, current: PreconditionEvidence[]): ContextMessage {
     const preview = commandPreview(fact)
     return message(
-      'Negative-ledger: this exact action previously failed and its evidence is unchanged.\n'
+      'Negative-ledger: this action previously failed. Advisory only; this call was not blocked.\n'
       + `- claim: ${fact.claim}\n`
       + (preview !== undefined ? `- action preview: ${preview}\n` : '')
-      + 'A retry will likely fail the same way; prefer a different approach.\n'
-      + 'Ledger totals: '
-      + `${stats.duplicateFailuresObserved} duplicate failure(s) observed, `
-      + `${stats.warningsEmitted} warning(s) emitted, `
-      + `${stats.callsDenied} call(s) denied.`,
+      + retryExplanation(fact, current),
       `${fact.kind} repeat`,
     )
   }
@@ -379,7 +680,7 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
   function staleNote(fact: NegativeFact): ContextMessage {
     const preview = commandPreview(fact)
     return message(
-      'Negative-ledger: a previous failure no longer applies because its evidence changed; a retry is allowed.\n'
+      'Negative-ledger: recorded preconditions changed; verification is allowed, but success is not guaranteed.\n'
       + `- claim: ${fact.claim}\n`
       + (preview !== undefined ? `- action preview: ${preview}\n` : ''),
       `${fact.kind} evidence changed`,
@@ -393,8 +694,8 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
     )
   }
 
-  function denyReason(fact: NegativeFact, verdict: 'block' | 'warn'): string {
-    const suffix = verdict === 'block' ? 'retry condition not met' : 'evidence unchanged'
+  function denyReason(fact: NegativeFact, current: PreconditionEvidence[]): string {
+    const suffix = retryExplanation(fact, current)
     const preview = commandPreview(fact)
     return `blocked by negative-ledger (${fact.kind}): ${fact.claim}`
       + (preview !== undefined ? ` [${preview}]` : '')
@@ -417,8 +718,9 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
       if (result.kind !== 'applied') {
         return { kind: 'deny', reason: 'blocked by negative-ledger: store unavailable (fail-closed)' }
       }
-      return { kind: 'deny', reason: denyReason(entry.fact, verdict) }
+      return { kind: 'deny', reason: denyReason(entry.fact, attempt.preconditionNow) }
     }
+    warningBucket(exec).delete(entry.fact.id)
     // allow / stale-allow: both are verification retries and compete for the lease.
     if (verdict === 'stale-allow') {
       // Read-through invalidation: commit the staleness BEFORE the lease so
@@ -472,19 +774,27 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
 
   return {
     async observeFs(target, observation, actor) {
-      observed.set(target.displayPath, observation)
+      const cached = { observation, at: Date.now() }
+      observed.set(target.displayPath, cached)
       const modelPath = actorModelPath(actor)
       if (modelPath !== undefined) {
-        observed.set(scopedModelKey(actorCwd(actor) ?? '', modelPath), observation)
+        observed.set(scopedModelKey(actorCwd(actor) ?? '', modelPath), cached)
         displayByModel.set(modelPath, target.displayPath)
       }
       if (mode === 'off') return
       await enqueue(async () => {
         const entries = await store.queryFacts()
         const batch: Parameters<LedgerStore['transitionFacts']>[0] = []
+        // Command facts invalidate on fresh evidence only — the same rule their
+        // queries use, so a pass and a query never disagree about staleness.
+        const all = currentPreconditions()
+        let fresh: PreconditionEvidence[] | undefined
         for (const entry of entries) {
           if (entry.fact.status !== 'active') continue
-          const staleWitnesses = mismatchedWitnessKinds(entry.fact, currentPreconditions())
+          const now = entry.fact.kind === 'command_failed'
+            ? (fresh ??= currentPreconditions(commandEvidenceMaxAgeMs))
+            : all
+          const staleWitnesses = mismatchedWitnessKinds(entry.fact, now)
           if (staleWitnesses.length === 0) continue
           const via = actorCallId(actor)
           const transition = via === undefined
@@ -511,11 +821,17 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
       if (mode === 'off' || !tracked(exec.name)) return undefined
       const attempt = attemptFor(exec)
       if (attempt === undefined) return undefined
+      // Freeze declared dependencies before dispatch; this is the only place a
+      // command precondition can originate.
+      freezeCommandDependencies(exec)
       return guardAttempt(exec, attempt)
     },
 
     async postExecute(exec, result) {
       if (mode === 'off' || !tracked(exec.name)) return []
+      // Consume the snapshot on every path so a denied or unrecordable call
+      // cannot leave evidence behind for a later invocation.
+      const dependencyWitnesses = takeCommandPreconditions(exec)
       // A call this policy denied pre-execution still flows through
       // post-execute as an isError result carrying our denial reason.
       if (result.isError && typeof result.error?.message === 'string'
@@ -552,7 +868,7 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
             if (entry !== undefined) contexts.push(staleNote(entry.fact))
           }
         } else {
-          const failure = failureToRecord(exec, result)
+          const failure = failureToRecord(exec, result, dependencyWitnesses)
           if (failure !== undefined) {
             await settle({ kind: 'failed', leaseId: lease.leaseId, owner: lease.owner, fact: failure, meta })
           } else {
@@ -566,6 +882,7 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
       const entry = await store.getFact(attempt.scope, attempt.kind, attempt.fingerprintJson)
       const verdict = entry === undefined ? undefined : verdictFor(entry.fact, attempt.preconditionNow)
       if (isSuccess(exec, result)) {
+        if (entry !== undefined) warningBucket(exec).delete(entry.fact.id)
         if (entry !== undefined && verdict === 'stale-allow') contexts.push(staleNote(entry.fact))
         // A fact under an active lease may only change through its holder's
         // settlement; a non-holder's success is observed, never applied.
@@ -589,27 +906,64 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
         if (note !== undefined) contexts.push(inProgressMessage(note))
         return contexts
       }
+      const failure = failureToRecord(exec, result, dependencyWitnesses)
+      let warningFact: NegativeFact | undefined
       if (entry !== undefined && (verdict === 'warn' || verdict === 'block')) {
-        const decision = await commitWithRetry(attempt, current => ({
-          factId: current.fact.id,
-          expectedRevision: current.revision,
-          decision: 'observe-warn',
-          meta: opMeta(exec),
-        }))
-        if (decision.kind === 'applied') contexts.push(await warnMessage(entry.fact))
+        const bucket = warningBucket(exec)
+        // Exclude revision and sliding TTL: recording the same failure changes
+        // both, but must not defeat notification suppression.
+        const signature = JSON.stringify(failure?.evidence ?? entry.fact.evidence)
+        // A pending advisory is not yet delivered. Wait for its commit before
+        // letting it suppress another call, including when the first commit fails.
+        for (;;) {
+          const pendingWarning = bucket.get(entry.fact.id)
+          if (pendingWarning === undefined) break
+          await pendingWarning.settled
+          if (bucket.get(entry.fact.id) === pendingWarning) break
+        }
+        const previous = bucket.get(entry.fact.id)
+        let release!: () => void
+        const stamp = { signature, at: Date.now(), settled: new Promise<void>(resolve => { release = resolve }) }
+        const emitWarning = warningRepeatAfterMs === 0 || previous === undefined
+          || previous.signature !== signature || stamp.at - previous.at >= warningRepeatAfterMs
+        if (emitWarning) {
+          bucket.delete(entry.fact.id)
+          bucket.set(entry.fact.id, stamp)
+          if (bucket.size > 256) bucket.delete(bucket.keys().next().value!)
+        }
+        let applied = false
+        try {
+          const decision = await commitWithRetry(attempt, current => ({
+            factId: current.fact.id,
+            expectedRevision: current.revision,
+            decision: 'observe-warn',
+            emitWarning,
+            meta: opMeta(exec),
+          }))
+          applied = decision.kind === 'applied'
+          if (applied && emitWarning) warningFact = entry.fact
+        } finally {
+          if (!applied && emitWarning && bucket.get(entry.fact.id) === stamp) {
+            if (previous === undefined) bucket.delete(entry.fact.id)
+            else bucket.set(entry.fact.id, previous)
+          }
+          release()
+        }
       } else if (entry !== undefined && verdict === 'stale-allow') {
+        warningBucket(exec).delete(entry.fact.id)
         contexts.push(staleNote(entry.fact))
       }
-      const failure = failureToRecord(exec, result)
       if (failure !== undefined) {
         try {
-          await store.recordFact(failure, opMeta(exec))
+          const recorded = await store.recordFact(failure, opMeta(exec))
+          if (warningFact !== undefined) warningFact = recorded.fact
         } catch (error) {
           // A concurrent lease holder owns this fact, or the store is busy:
           // this non-holder only observes.
           if (!/active verification lease/.test(String(error)) && !/store-busy/.test(String(error))) throw error
         }
       }
+      if (warningFact !== undefined) contexts.push(warnMessage(warningFact, attempt.preconditionNow))
       if (note !== undefined) contexts.push(inProgressMessage(note))
       return contexts
     },

@@ -83,7 +83,7 @@ const secondFail = await warnPolicy.postExecute(bashExec(command), bashFail(1))
 check('第二次重复被旧证据提醒', secondFail.length === 1
   && textOf(secondFail).includes('Negative-ledger')
   && textOf(secondFail).includes('command exited 1 (bash)')
-  && textOf(secondFail).includes('1 duplicate failure(s) observed'))
+  && textOf(secondFail).includes('Retry cooldown until'))
 console.log('  提醒内容摘要:')
 console.log(`    ${textOf(secondFail).split('\n')[0]}`)
 
@@ -114,14 +114,14 @@ const staledClaims = (await store.queryFacts()).filter(entry => entry.fact.statu
 console.log('第 3 次读取成功（文件已存在）')
 const thirdRead = await warnPolicy.postExecute(readExec(missingPath), readOk())
 check('提醒已撤销：不再出现"证据未变"警告', !textOf(thirdRead).includes('evidence is unchanged'))
-check('允许重试并给出失效说明', textOf(thirdRead).includes('retry is allowed'))
+check('允许重试并给出失效说明', textOf(thirdRead).includes('verification is allowed'))
 check('成功重试后结论闭环为 resolved', (await store.queryFacts()).find(entry => entry.fact.kind === 'file_missing' && entry.fact.status !== 'superseded')?.fact.status === 'resolved')
 console.log(`    ${textOf(thirdRead).split('\n')[0]}`)
 
 // --- report ----------------------------------------------------------------
 
 const summary = await store.summarize()
-const hitFacts = (await store.queryFacts()).filter(entry => entry.fact.savings.warningsEmitted + entry.fact.savings.callsDenied > 0)
+const hitFacts = (await store.queryFacts()).filter(entry => entry.fact.savings.duplicateFailuresObserved + entry.fact.savings.warningsEmitted + entry.fact.savings.callsDenied > 0)
 
 console.log('\n=== 演示报告 ===')
 console.log(`本轮命中 ${summary.factsHit} 条失败知识：`)
