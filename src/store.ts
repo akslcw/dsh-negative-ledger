@@ -52,6 +52,16 @@ export interface AttemptDecisionRequest {
   decision: 'deny' | 'observe-warn' | 'verify-retry'
   meta: OperationMeta
   leaseRequest?: { leaseId: string; owner: string; ttlMs: number }
+  /**
+   * `observe-warn` only; ignored by the other decisions (neither emits an
+   * advisory). Whether this repeat actually attaches a model-facing warning.
+   * Default `true` — the pre-existing behavior. `false` records the repeat
+   * exactly as before: the decision still commits transactionally and
+   * idempotently and `duplicateFailuresObserved` still increments, but
+   * `warningsEmitted` does not. Suppressing the message must never be a way
+   * to make a repeated failure disappear from the ledger.
+   */
+  emitWarning?: boolean
 }
 
 export type AttemptDecisionResult =

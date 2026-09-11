@@ -39,7 +39,12 @@ const STORE_VERSION = 1
 interface StoredLine {
   v: typeof STORE_VERSION
   fact?: Omit<NegativeFact, 'savings'>
-  hit?: { factId: string; mode: 'warn' | 'block'; at: string }
+  /**
+   * One interception. `emitWarning` is written only when it is `false`
+   * (a suppressed advisory); its absence — every line written before this
+   * field existed — means the warning was emitted.
+   */
+  hit?: { factId: string; mode: 'warn' | 'block'; at: string; emitWarning?: boolean }
 }
 
 export interface LedgerOptions {
@@ -78,7 +83,7 @@ export class NegativeLedger {
   #load(): void {
     if (!existsSync(this.#file)) return
     const lines = readFileSync(this.#file, 'utf8').split('\n')
-    const pendingHits: Array<{ factId: string; mode: 'warn' | 'block' }> = []
+    const pendingHits: Array<NonNullable<StoredLine['hit']>> = []
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index]?.trim() ?? ''
       if (line === '') continue
@@ -105,7 +110,7 @@ export class NegativeLedger {
     // Hits fold only onto facts that exist after the complete fold; a hit
     // referencing an unknown fact id is corrupt data and stays uncounted.
     for (const hit of pendingHits) {
-      if (this.#facts.has(hit.factId)) this.#applyHit(hit.factId, hit.mode)
+      if (this.#facts.has(hit.factId)) this.#applyHit(hit.factId, hit.mode, hit.emitWarning !== false)
     }
   }
 
@@ -125,16 +130,18 @@ export class NegativeLedger {
     appendFileSync(this.#file, `${JSON.stringify(line)}\n`, { mode: 0o600 })
   }
 
-  #applyHit(id: string, mode: 'warn' | 'block'): void {
+  #applyHit(id: string, mode: 'warn' | 'block', emitWarning = true): void {
     const previous = this.#savings.get(id) ?? ZERO_SAVINGS
     // A `warn` hit is emitted after the duplicate call executed and failed,
-    // so it counts both the observation and the warning. A `block` hit is a
-    // pre-execution deny — the only proven avoided execution.
+    // so it counts the observation always — and the warning only when one was
+    // actually attached (`emitWarning: false` still observes the duplicate).
+    // A `block` hit is a pre-execution deny — the only proven avoided
+    // execution.
     this.#savings.set(id, mode === 'warn'
       ? {
         ...previous,
         duplicateFailuresObserved: previous.duplicateFailuresObserved + 1,
-        warningsEmitted: previous.warningsEmitted + 1,
+        warningsEmitted: previous.warningsEmitted + (emitWarning ? 1 : 0),
       }
       : { ...previous, callsDenied: previous.callsDenied + 1 })
   }
@@ -267,12 +274,21 @@ export class NegativeLedger {
     }))
   }
 
-  /** Count one interception; called by the plugin after warn/block. */
-  recordHit(id: string, mode: 'warn' | 'block'): void {
+  /**
+   * Count one interception; called by the plugin after warn/block.
+   *
+   * `emitWarning: false` marks a repeat whose advisory was suppressed: the
+   * duplicate failure is still observed and persisted, only the warning
+   * counter stays untouched. The flag is written to the line solely when it
+   * is `false`, so every line this engine wrote before the flag existed keeps
+   * its exact byte form and folds back as "warning emitted".
+   */
+  recordHit(id: string, mode: 'warn' | 'block', emitWarning = true): void {
     if (!this.#facts.has(id)) return
-    this.#applyHit(id, mode)
-    const line: StoredLine = { v: STORE_VERSION, hit: { factId: id, mode, at: new Date().toISOString() } }
-    appendFileSync(this.#file, `${JSON.stringify(line)}\n`, { mode: 0o600 })
+    this.#applyHit(id, mode, emitWarning)
+    const hit: NonNullable<StoredLine['hit']> = { factId: id, mode, at: new Date().toISOString() }
+    if (!emitWarning) hit.emitWarning = false
+    appendFileSync(this.#file, `${JSON.stringify({ v: STORE_VERSION, hit } satisfies StoredLine)}\n`, { mode: 0o600 })
   }
 
   summarizeSavings(): SavingsSummary {
@@ -281,7 +297,9 @@ export class NegativeLedger {
     let callsDenied = 0
     let factsHit = 0
     for (const savings of this.#savings.values()) {
-      if (savings.warningsEmitted + savings.callsDenied > 0) factsHit += 1
+      // A hit is any fact that intercepted: an observed duplicate counts even
+      // when its advisory was suppressed.
+      if (savings.duplicateFailuresObserved + savings.warningsEmitted + savings.callsDenied > 0) factsHit += 1
       duplicateFailuresObserved += savings.duplicateFailuresObserved
       warningsEmitted += savings.warningsEmitted
       callsDenied += savings.callsDenied

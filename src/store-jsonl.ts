@@ -91,7 +91,9 @@ export class JsonlLedgerStore implements LedgerStore {
       return { kind: 'applied' }
     }
     if (request.decision === 'observe-warn') {
-      this.#engine.recordHit(request.factId, 'warn')
+      // Warning emitted unless the caller explicitly suppressed it; either way
+      // the duplicate failure is counted and persisted.
+      this.#engine.recordHit(request.factId, 'warn', request.emitWarning !== false)
       return { kind: 'applied' }
     }
     // verify-retry: unconditional local lease — a single process has no
@@ -159,7 +161,11 @@ export class JsonlLedgerStore implements LedgerStore {
       summary.duplicateFailuresObserved += fact.savings.duplicateFailuresObserved
       summary.warningsEmitted += fact.savings.warningsEmitted
       summary.callsDenied += fact.savings.callsDenied
-      if (fact.savings.warningsEmitted + fact.savings.callsDenied > 0) summary.factsHit += 1
+      // Same predicate as NegativeLedger.summarizeSavings: an observed
+      // duplicate without a warning still makes the fact a hit.
+      if (fact.savings.duplicateFailuresObserved + fact.savings.warningsEmitted + fact.savings.callsDenied > 0) {
+        summary.factsHit += 1
+      }
     }
     return summary
   }

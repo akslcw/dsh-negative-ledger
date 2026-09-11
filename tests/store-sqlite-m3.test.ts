@@ -153,6 +153,51 @@ describe('M3 acceptance', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  it('A4: emitWarning:false observes the duplicate without counting a warning', async () => {
+    const dir = tempDir()
+    const store = new SqliteLedgerStore({ dir })
+    const fact = await record(store, 'op-1')
+    // Absent flag is the compatible default; `false` suppresses only the
+    // warning, never the observation.
+    await store.commitAttemptDecision({
+      factId: fact.fact.id, expectedRevision: 1, decision: 'observe-warn', emitWarning: false,
+      meta: { operationId: 'd-1', toolCallId: 'call-1' },
+    })
+    assert.deepEqual(await store.summarize(), { factsHit: 1, duplicateFailuresObserved: 1, warningsEmitted: 0, callsDenied: 0 })
+    await store.commitAttemptDecision({
+      factId: fact.fact.id, expectedRevision: 1, decision: 'observe-warn',
+      meta: { operationId: 'd-2', toolCallId: 'call-2' },
+    })
+    assert.deepEqual(await store.summarize(), { factsHit: 1, duplicateFailuresObserved: 2, warningsEmitted: 1, callsDenied: 0 })
+    // Receipt replay returns the original result and re-counts nothing.
+    const replay = await store.commitAttemptDecision({
+      factId: fact.fact.id, expectedRevision: 1, decision: 'observe-warn', emitWarning: false,
+      meta: { operationId: 'd-1', toolCallId: 'call-1' },
+    })
+    assert.equal(replay.kind, 'applied')
+    assert.deepEqual(await store.summarize(), { factsHit: 1, duplicateFailuresObserved: 2, warningsEmitted: 1, callsDenied: 0 })
+    // A fresh operationId for the same tool call: the operation-level index
+    // still blocks the recount.
+    await store.commitAttemptDecision({
+      factId: fact.fact.id, expectedRevision: 1, decision: 'observe-warn', emitWarning: false,
+      meta: { operationId: 'd-3', toolCallId: 'call-1' },
+    })
+    assert.deepEqual(await store.summarize(), { factsHit: 1, duplicateFailuresObserved: 2, warningsEmitted: 1, callsDenied: 0 })
+    // The disposition is part of the operation identity, not a silent no-op.
+    await assert.rejects(
+      () => store.commitAttemptDecision({
+        factId: fact.fact.id, expectedRevision: 1, decision: 'observe-warn',
+        meta: { operationId: 'd-1', toolCallId: 'call-1' },
+      }),
+      /operation-replay-conflict/,
+    )
+    // Counters are derived: reconcile must rebuild the same split from events.
+    await store.reconcile()
+    assert.deepEqual(await store.summarize(), { factsHit: 1, duplicateFailuresObserved: 2, warningsEmitted: 1, callsDenied: 0 })
+    await store.close()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
   it('rejects recordFact while a lease is active (no settlement bypass)', async () => {
     const dir = tempDir()
     const store = new SqliteLedgerStore({ dir })

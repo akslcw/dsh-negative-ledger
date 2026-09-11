@@ -6,7 +6,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
@@ -79,6 +79,37 @@ describe('JsonlLedgerStore (LedgerStore v3 equivalence)', () => {
       warningsEmitted: 1,
       callsDenied: 0,
     })
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('counts a suppressed observation as a hit and folds flagless legacy hit lines as warned', async () => {
+    const dir = tempDir()
+    const store = new JsonlLedgerStore({ dir })
+    const fact = await store.recordFact(commandInput('/repo'), { operationId: 'op-1' })
+    await store.commitAttemptDecision({
+      factId: fact.fact.id, expectedRevision: 1, decision: 'observe-warn', emitWarning: false,
+      meta: { operationId: 'd-1' },
+    })
+    await store.commitAttemptDecision({
+      factId: fact.fact.id, expectedRevision: 1, decision: 'observe-warn',
+      meta: { operationId: 'd-2' },
+    })
+    assert.deepEqual(await store.summarize(), { factsHit: 1, duplicateFailuresObserved: 2, warningsEmitted: 1, callsDenied: 0 })
+    assert.deepEqual(await store.summarize('/repo'), { factsHit: 1, duplicateFailuresObserved: 2, warningsEmitted: 1, callsDenied: 0 })
+    const hits = readFileSync(join(dir, 'ledger.jsonl'), 'utf8').trim().split('\n')
+      .map(line => JSON.parse(line) as { hit?: Record<string, unknown> })
+      .filter(line => line.hit !== undefined)
+      .map(line => line.hit!)
+    assert.equal(hits[0]?.emitWarning, false)
+    // A warned hit keeps the v0 line form byte-for-byte.
+    assert.equal('emitWarning' in (hits[1] ?? {}), false)
+    // Reload: the suppressed duplicate survives, its warning does not — and a
+    // hand-written v0 line (no flag) still means "warning emitted".
+    const reloaded = new JsonlLedgerStore({ dir })
+    assert.deepEqual(await reloaded.summarize(), { factsHit: 1, duplicateFailuresObserved: 2, warningsEmitted: 1, callsDenied: 0 })
+    appendFileSync(join(dir, 'ledger.jsonl'),
+      `${JSON.stringify({ v: 1, hit: { factId: fact.fact.id, mode: 'warn', at: new Date().toISOString() } })}\n`)
+    assert.deepEqual(await new JsonlLedgerStore({ dir }).summarize(), { factsHit: 1, duplicateFailuresObserved: 3, warningsEmitted: 2, callsDenied: 0 })
     rmSync(dir, { recursive: true, force: true })
   })
 

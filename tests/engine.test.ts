@@ -6,7 +6,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
@@ -302,6 +302,42 @@ describe('recordHit and summarizeSavings', () => {
       callsDenied: 1,
     })
     rmSync(ledger.dir, { recursive: true, force: true })
+  })
+
+  it('counts a suppressed observation as a duplicate hit and persists the flag', () => {
+    const dir = tempDir()
+    const ledger = new NegativeLedger({ dir })
+    const fact = ledger.recordNegativeFact(commandInput())
+    ledger.recordHit(fact.id, 'warn', false)
+    assert.deepEqual(ledger.facts()[0]?.savings, {
+      duplicateFailuresObserved: 1,
+      warningsEmitted: 0,
+      callsDenied: 0,
+    })
+    // The duplicate is still a hit: suppression must not hide the failure.
+    assert.deepEqual(ledger.summarizeSavings(), {
+      factsHit: 1,
+      duplicateFailuresObserved: 1,
+      warningsEmitted: 0,
+      callsDenied: 0,
+    })
+    // The flag travels with the line; an unsuppressed hit stays byte-plain and
+    // both fold back the same way they were written.
+    ledger.recordHit(fact.id, 'warn')
+    const reloaded = new NegativeLedger({ dir })
+    assert.deepEqual(reloaded.summarizeSavings(), {
+      factsHit: 1,
+      duplicateFailuresObserved: 2,
+      warningsEmitted: 1,
+      callsDenied: 0,
+    })
+    const hits = readFileSync(join(dir, 'ledger.jsonl'), 'utf8').trim().split('\n')
+      .map(line => JSON.parse(line) as { hit?: Record<string, unknown> })
+      .filter(line => line.hit !== undefined)
+      .map(line => line.hit!)
+    assert.equal(hits[0]?.emitWarning, false)
+    assert.equal('emitWarning' in (hits[1] ?? {}), false)
+    rmSync(dir, { recursive: true, force: true })
   })
 })
 

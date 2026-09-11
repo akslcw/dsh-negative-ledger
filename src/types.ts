@@ -86,8 +86,11 @@ export type FactStatus = 'active' | 'stale' | 'resolved' | 'superseded'
  * Honest interception counters, each independently meaningful:
  *
  * - `duplicateFailuresObserved`: a later attempt executed and failed the
- *   same way again (observed, not prevented).
- * - `warningsEmitted`: advisory contexts attached to executed results.
+ *   same way again (observed, not prevented). Counted for every observed
+ *   repeat, including ones whose advisory was suppressed
+ *   (`emitWarning: false` in the store seam).
+ * - `warningsEmitted`: advisory contexts attached to executed results — a
+ *   subset of the observed duplicates.
  * - `callsDenied`: pre-execution denies — the only counter that proves an
  *   execution was avoided.
  *
@@ -172,6 +175,12 @@ export interface InvalidatedFact {
 }
 
 export interface SavingsSummary {
+  /**
+   * Facts that intercepted at least once — a fact whose repeats were only
+   * observed (advisory suppressed, so `warningsEmitted` stays 0) still counts
+   * as hit, otherwise suppressing a message would hide the duplicate failures
+   * it observed.
+   */
   factsHit: number
   duplicateFailuresObserved: number
   warningsEmitted: number

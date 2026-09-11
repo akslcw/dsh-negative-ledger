@@ -141,6 +141,16 @@ function canonicalStoredFingerprint(input: FactInput): string {
   return JSON.stringify(joined)
 }
 
+/**
+ * One line of a v0 JSONL ledger. `emitWarning` is absent on every line the v0
+ * engine wrote; it appears only on hit lines whose advisory was suppressed.
+ */
+interface ImportedLine {
+  v?: unknown
+  fact?: Record<string, unknown>
+  hit?: { factId: string; mode: string; at?: string; emitWarning?: unknown }
+}
+
 export interface SqliteLedgerStoreOptions {
   /** Directory holding `ledger.db`; created on demand (0700). */
   dir?: string
@@ -308,20 +318,24 @@ export class SqliteLedgerStore implements LedgerStore {
     return Number(result.changes)
   }
 
-  #upsertCounter(factId: string, mode: 'observe-warn' | 'deny'): void {
-    if (mode === 'observe-warn') {
-      this.#db.prepare(
-        `INSERT INTO counters (fact_id, duplicate_failures_observed, warnings_emitted) VALUES (?, 1, 1)
-         ON CONFLICT(fact_id) DO UPDATE SET
-           duplicate_failures_observed = duplicate_failures_observed + 1,
-           warnings_emitted = warnings_emitted + 1`,
-      ).run(factId)
-    } else {
+  #upsertCounter(factId: string, mode: 'observe-warn' | 'observe-silent' | 'deny'): void {
+    if (mode === 'deny') {
       this.#db.prepare(
         `INSERT INTO counters (fact_id, calls_denied) VALUES (?, 1)
          ON CONFLICT(fact_id) DO UPDATE SET calls_denied = calls_denied + 1`,
       ).run(factId)
+      return
     }
+    // An observed repeat always counts; only `observe-warn` also counts the
+    // advisory, so a suppressed warning (emitWarning: false) leaves
+    // warnings_emitted untouched instead of hiding the duplicate failure.
+    const warned = mode === 'observe-warn' ? 1 : 0
+    this.#db.prepare(
+      `INSERT INTO counters (fact_id, duplicate_failures_observed, warnings_emitted) VALUES (?, 1, ?)
+       ON CONFLICT(fact_id) DO UPDATE SET
+         duplicate_failures_observed = duplicate_failures_observed + 1,
+         warnings_emitted = warnings_emitted + ?`,
+    ).run(factId, warned, warned)
   }
 
   /** Lease issuance inside the decision transaction (the only entry that grants leases). */
@@ -530,6 +544,12 @@ export class SqliteLedgerStore implements LedgerStore {
       expectedRevision: request.expectedRevision,
       decision: request.decision,
       leaseRequest: request.leaseRequest ?? null,
+      // Only a suppressed observe-warn carries a disposition, so only that
+      // request gets an extra hash field: a suppressed and a warned decision
+      // under one operationId are different operations (a conflict, not a
+      // no-op), while every other decision — and every receipt written before
+      // this field existed — keeps its original hash.
+      ...(request.decision === 'observe-warn' && request.emitWarning === false ? { emitWarning: false } : {}),
     }))
     try {
       return this.#tx(() => {
@@ -557,11 +577,18 @@ export class SqliteLedgerStore implements LedgerStore {
         if (inserted > 0) this.#upsertCounter(request.factId, 'deny')
         result = { kind: 'applied' }
       } else if (request.decision === 'observe-warn') {
+        const emitWarning = request.emitWarning !== false
         const inserted = this.#insertEvent({
           operationId: request.meta.operationId, operationKind: 'attempt_decision', kind: 'attempt_observed',
-          factId: request.factId, scope, at, payload: {}, toolCallId: request.meta.toolCallId, actor: request.meta.actor,
+          factId: request.factId, scope, at,
+          // The payload is what reconcile() reads to rebuild the counters, so
+          // the suppression disposition has to be recorded on the event. The
+          // key is omitted when the warning was emitted, keeping the pre-
+          // existing event bytes (and its "absent means warned" default).
+          payload: emitWarning ? {} : { emitWarning: false },
+          toolCallId: request.meta.toolCallId, actor: request.meta.actor,
         })
-        if (inserted > 0) this.#upsertCounter(request.factId, 'observe-warn')
+        if (inserted > 0) this.#upsertCounter(request.factId, emitWarning ? 'observe-warn' : 'observe-silent')
         result = { kind: 'applied' }
       } else {
         if (request.leaseRequest === undefined) throw new Error('verify-retry requires a leaseRequest')
@@ -708,7 +735,7 @@ export class SqliteLedgerStore implements LedgerStore {
                 COALESCE(SUM(duplicate_failures_observed), 0) AS dup,
                 COALESCE(SUM(warnings_emitted), 0) AS warned,
                 COALESCE(SUM(calls_denied), 0) AS denied
-         FROM counters WHERE warnings_emitted + calls_denied > 0`,
+         FROM counters WHERE duplicate_failures_observed + warnings_emitted + calls_denied > 0`,
       ).all()
       : this.#db.prepare(
         `SELECT COUNT(*) AS hits,
@@ -716,7 +743,8 @@ export class SqliteLedgerStore implements LedgerStore {
                 COALESCE(SUM(c.warnings_emitted), 0) AS warned,
                 COALESCE(SUM(c.calls_denied), 0) AS denied
          FROM counters c JOIN facts f ON f.id = c.fact_id
-         WHERE f.scope = ? AND (c.warnings_emitted + c.calls_denied) > 0`,
+         WHERE f.scope = ?
+           AND (c.duplicate_failures_observed + c.warnings_emitted + c.calls_denied) > 0`,
       ).all(scope)
     const row = rows[0] ?? { hits: 0, dup: 0, warned: 0, denied: 0 }
     return {
@@ -730,11 +758,17 @@ export class SqliteLedgerStore implements LedgerStore {
   async reconcile(): Promise<void> {
     this.#tx(() => {
       this.#db.exec('DELETE FROM counters')
+      // Every observed attempt counts as a duplicate; only the ones whose
+      // event does not carry `emitWarning: false` also count as warnings.
+      // Events written before the flag existed (and imported JSONL hits, whose
+      // payload is `{}`) default to "warned".
       this.#db.exec(
         `INSERT INTO counters (fact_id, duplicate_failures_observed, warnings_emitted, calls_denied)
          SELECT fact_id,
                 SUM(CASE WHEN kind = 'attempt_observed' THEN 1 ELSE 0 END),
-                SUM(CASE WHEN kind = 'attempt_observed' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN kind = 'attempt_observed'
+                          AND COALESCE(json_extract(payload, '$.emitWarning'), 1) = 1
+                         THEN 1 ELSE 0 END),
                 SUM(CASE WHEN kind = 'attempt_denied' THEN 1 ELSE 0 END)
          FROM events
          WHERE kind IN ('attempt_observed', 'attempt_denied')
@@ -753,9 +787,9 @@ export class SqliteLedgerStore implements LedgerStore {
         const line = lines[index]?.trim() ?? ''
         if (line === '') continue
         report.lines += 1
-        let parsed: { v?: unknown; fact?: Record<string, unknown>; hit?: { factId: string; mode: string } }
+        let parsed: ImportedLine
         try {
-          parsed = JSON.parse(line) as { v?: unknown; fact?: Record<string, unknown>; hit?: { factId: string; mode: string } }
+          parsed = JSON.parse(line) as ImportedLine
         } catch {
           report.failures.push(`line ${index + 1}: not valid JSON`)
           continue
@@ -817,27 +851,29 @@ export class SqliteLedgerStore implements LedgerStore {
             report.failures.push(`line ${index + 1}: unknown hit mode ${String(mode)}`)
             continue
           }
+          if (parsed.hit.emitWarning !== undefined && typeof parsed.hit.emitWarning !== 'boolean') {
+            report.failures.push(`line ${index + 1}: hit emitWarning must be a boolean`)
+            continue
+          }
+          // A suppressed advice must survive the import in BOTH forms: the
+          // event payload (what reconcile() rebuilds warnings_emitted from)
+          // and the counters. Importing it as an ordinary warning would make
+          // the counters disagree with reconcile the moment it runs.
+          const suppression = parsed.hit.emitWarning === false
           const eventId = `import:${sha256(line)}`
           const inserted = this.#db.prepare(
             `INSERT OR IGNORE INTO events (event_id, operation_id, operation_kind, at, kind, fact_id, scope, payload)
              VALUES (?, ?, 'import', ?, ?, ?, (SELECT scope FROM facts WHERE id = ?), ?)`,
-          ).run(eventId, eventId, parsed.hit && 'at' in parsed.hit ? String((parsed.hit as { at?: string }).at ?? nowIso()) : nowIso(),
-            mode === 'warn' ? 'attempt_observed' : 'attempt_denied', factId, factId, JSON.stringify({}))
+          ).run(eventId, eventId, parsed.hit.at === undefined ? nowIso() : String(parsed.hit.at),
+            mode === 'warn' ? 'attempt_observed' : 'attempt_denied', factId, factId,
+            JSON.stringify(suppression ? { emitWarning: false } : {}))
           if (Number(inserted.changes) === 0) {
             report.skipped += 1
             continue
           }
-          if (mode === 'warn') {
-            this.#db.prepare(
-              `INSERT INTO counters (fact_id, duplicate_failures_observed, warnings_emitted) VALUES (?, 1, 1)
-               ON CONFLICT(fact_id) DO UPDATE SET duplicate_failures_observed = duplicate_failures_observed + 1, warnings_emitted = warnings_emitted + 1`,
-            ).run(factId)
-          } else {
-            this.#db.prepare(
-              `INSERT INTO counters (fact_id, calls_denied) VALUES (?, 1)
-               ON CONFLICT(fact_id) DO UPDATE SET calls_denied = calls_denied + 1`,
-            ).run(factId)
-          }
+          // Same counter upsert as the live decision path: the two must not
+          // drift apart again.
+          this.#upsertCounter(factId, mode === 'warn' ? (suppression ? 'observe-silent' : 'observe-warn') : 'deny')
           report.hits += 1
         } else {
           report.failures.push(`line ${index + 1}: neither fact nor hit`)

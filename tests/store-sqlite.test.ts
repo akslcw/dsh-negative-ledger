@@ -136,6 +136,34 @@ describe('SqliteLedgerStore (M2)', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
+  it('imports suppressed hit lines without inflating warnings, and reconcile agrees', async () => {
+    const fixtureDir = tempDir()
+    const engine = new NegativeLedger({ dir: fixtureDir })
+    const fact = engine.recordNegativeFact({
+      kind: 'command_failed',
+      fingerprint: { kind: 'command_failed', tool: 'bash', commandLine: 'npm install', cwd: '/repo' },
+      claim: 'npm install fails under the mirror',
+      evidence: [{ role: 'outcome', kind: 'command-exit', exitCode: 1, stderrSignature: 'ETIMEDOUT' }],
+    })
+    engine.recordHit(fact.id, 'warn', false)
+    engine.recordHit(fact.id, 'warn')
+
+    const dir = tempDir()
+    const store = new SqliteLedgerStore({ dir })
+    const report = await store.importJsonl(join(fixtureDir, 'ledger.jsonl'))
+    assert.equal(report.facts, 1)
+    assert.equal(report.hits, 2)
+    const expected = { factsHit: 1, duplicateFailuresObserved: 2, warningsEmitted: 1, callsDenied: 0 }
+    assert.deepEqual(await store.summarize(), expected)
+    // The payload carries the suppression, so the rebuilt counters match the
+    // imported ones instead of counting the silent observation as a warning.
+    await store.reconcile()
+    assert.deepEqual(await store.summarize(), expected)
+    await store.close()
+    rmSync(fixtureDir, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true })
+  })
+
   it('fails loud on malformed import lines', async () => {
     const dir = tempDir()
     const store = new SqliteLedgerStore({ dir })
