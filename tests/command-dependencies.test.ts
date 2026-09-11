@@ -153,6 +153,11 @@ for (const backend of ['jsonl', 'sqlite'] as const) describe(`command dependenci
     const denied = await observer.policy.preExecute(f.exec())
     assert.equal(denied?.kind, 'deny')
     assert.ok(denied?.kind === 'deny' && denied.reason.includes('no change has been confirmed'))
+    // NEVER observed in this context is a different message from expired: the
+    // file is still named, but the reason is "nothing was recorded here", not
+    // "what was recorded aged out".
+    assert.ok(denied?.kind === 'deny' && denied.reason.includes(`no observation of ${f.dep}`))
+    assert.ok(denied?.kind === 'deny' && !denied.reason.includes('is no longer fresh'))
   })
 
   it('treats an expired dependency observation as unknown until it is re-observed', async t => {
@@ -165,6 +170,12 @@ for (const backend of ['jsonl', 'sqlite'] as const) describe(`command dependenci
     const denied = await f.policy.preExecute(f.exec())
     assert.equal(denied?.kind, 'deny')
     assert.ok(denied?.kind === 'deny' && denied.reason.includes('no change has been confirmed'))
+    // An EXPIRED observation is reported as exactly that: the file is named,
+    // re-reading it is suggested, and no release is promised.
+    assert.ok(denied?.kind === 'deny' && denied.reason.includes(f.dep))
+    assert.ok(denied?.kind === 'deny' && denied.reason.includes('is no longer fresh'))
+    assert.ok(denied?.kind === 'deny' && denied.reason.includes('may confirm a change and enable an early retry'))
+    assert.ok(denied?.kind === 'deny' && !denied.reason.includes('cannot release the retry early'))
     // Fresh evidence releases it again — expiry alone changes nothing durable.
     await f.policy.observeFs({ displayPath: f.dep }, { kind: 'present', version: 'v2' })
     assert.equal(await f.policy.preExecute(f.exec()), undefined)
@@ -201,6 +212,52 @@ for (const backend of ['jsonl', 'sqlite'] as const) describe(`command dependenci
     // The lease was released, not held: the next retry can apply for one
     // instead of being told a verification is already in progress.
     assert.equal(await f.policy.preExecute(f.exec()), undefined)
+  })
+
+  it('attaches the withdrawal note when the read-through path marks the repair stale', async t => {
+    const f = fixture(t, ctx => ({ commandDependencies: [ctx.rule()] }))
+    await f.policy.observeFs({ displayPath: f.dep }, { kind: 'present', version: 'v1' })
+    await recordFailure(f, f.exec())
+    // Hold the observation's invalidation pass at its first store read, so the
+    // pre-dispatch read-through is deterministically the path that transitions
+    // the fact. The 250ms backstop only guarantees the pass never stays stuck.
+    const realQueryFacts = f.store.queryFacts.bind(f.store)
+    let heldPass: (() => void) | undefined
+    let holdNextRead = true
+    f.store.queryFacts = async (...args: Parameters<LedgerStore['queryFacts']>) => {
+      if (holdNextRead) {
+        holdNextRead = false
+        await new Promise<void>(resolve => { heldPass = resolve; setTimeout(resolve, 250) })
+      }
+      return realQueryFacts(...args)
+    }
+    void f.policy.observeFs({ displayPath: f.dep }, { kind: 'present', version: 'v2' })
+    const retry = f.exec()
+    assert.equal(await f.policy.preExecute(retry), undefined)
+    // The read-through, not the pass, committed the staleness the lease was
+    // granted on — and the lease must still report that it was.
+    assert.equal((await f.store.queryFacts())[0]?.fact.status, 'stale')
+    heldPass?.()
+    await f.policy.drain()
+    const contexts = await f.policy.postExecute(retry, ok)
+    assert.equal(contexts.length, 1)
+    assert.ok(contexts[0]?.content[0]?.text.includes('recorded preconditions changed'))
+    assert.ok(contexts[0]?.content[0]?.text.includes('verification is allowed, but success is not guaranteed'))
+    assert.equal((await f.store.queryFacts())[0]?.fact.status, 'resolved')
+  })
+
+  it('attaches the withdrawal note when the invalidation pass marked the repair stale first', async t => {
+    const f = fixture(t, ctx => ({ commandDependencies: [ctx.rule()] }))
+    await f.policy.observeFs({ displayPath: f.dep }, { kind: 'present', version: 'v1' })
+    await recordFailure(f, f.exec())
+    await f.policy.observeFs({ displayPath: f.dep }, { kind: 'present', version: 'v2' })
+    assert.equal((await f.store.queryFacts())[0]?.fact.status, 'stale')
+    const retry = f.exec()
+    assert.equal(await f.policy.preExecute(retry), undefined)
+    const contexts = await f.policy.postExecute(retry, ok)
+    assert.equal(contexts.length, 1)
+    assert.ok(contexts[0]?.content[0]?.text.includes('recorded preconditions changed'))
+    assert.equal((await f.store.queryFacts())[0]?.fact.status, 'resolved')
   })
 
   it('never backfills a dependency observed after the command was dispatched', async t => {

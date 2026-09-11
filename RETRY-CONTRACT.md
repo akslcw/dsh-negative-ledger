@@ -81,6 +81,12 @@ the in-memory observation cache is not.
 
 - Messages distinguish absent preconditions, incomplete current evidence,
   positively matching preconditions, and the recorded retry condition.
+- Incomplete evidence names which recorded `file-state` witness is stale
+  (observed here but aged out) versus never observed in this context, and only
+  for those does it suggest re-reading the file as a way to confirm a change;
+  non-file witnesses keep the generic wording. The release path is described as
+  a cooldown only for an `after` condition — otherwise it is a retry
+  restriction that clearance or a confirmed change ends.
 - Cumulative totals remain in `stats`; they are no longer appended to warnings.
 - `warningRepeatAfterMs` defaults to 60000. Set it to `0` to disable suppression
   and evaluate text changes independently.

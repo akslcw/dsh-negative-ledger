@@ -261,7 +261,10 @@ interface LeaseGrant {
   leaseId: string
   factId: string
   owner: string
-  /** The fact was stale when the lease was granted (drives the withdrawal note). */
+  /**
+   * The lease was granted on changed evidence (a stale-allow verdict, or an
+   * already-stale fact), so settling it successfully emits the withdrawal note.
+   */
   staleAtGrant: boolean
 }
 
@@ -565,8 +568,15 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
       if (!result.isError || result.error?.info?.code !== 'FS_NOT_FOUND') return undefined
       const path = sanitize(args.file_path)
       const cwd = execCwd(exec)
-      const witnessPaths = new Set([scopedModelKey(cwd, path)])
-      const displayPath = displayByModel.get(path)
+      // Both witnesses are scoped by the SAME session key (`cwd + model path`):
+      // the scoped key is the cache entry `observeFs` writes for a relative
+      // path, and the display path is the absolute file that observation
+      // resolved to. Looking the display path up by the bare model path would
+      // let another session's file become this fact's evidence — a relative
+      // path alias from another project, which the config contract forbids.
+      const scopedKey = scopedModelKey(cwd, path)
+      const witnessPaths = new Set([scopedKey])
+      const displayPath = displayByModel.get(scopedKey)
       if (displayPath !== undefined) witnessPaths.add(displayPath)
       return {
         kind: 'file_missing',
@@ -640,6 +650,29 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
     }
   }
 
+  /** Sanitized, de-duplicated, length-capped path list for model-facing text. */
+  function pathList(paths: readonly string[]): string {
+    const unique = [...new Set(paths)]
+    const listed = unique.slice(0, 3).map(path => sanitize(path))
+    return `${listed.join(', ')}${unique.length > listed.length ? ` (+${unique.length - listed.length} more)` : ''}`
+  }
+
+  /**
+   * Model-facing reason for a block or warning. It owes the model two honest
+   * answers: what the plugin can still say about the recorded preconditions
+   * NOW, and whether re-reading a recorded FILE could release the retry early.
+   *
+   * Only a `file-state` witness can be answered by re-reading. A witness the
+   * freshness window no longer covers was observed here, so re-observing the
+   * file may show the change that releases the retry; a witness never observed
+   * in this context cannot be compared against anything, so no re-read shortens
+   * the restriction; and a witness that is not file state at all (environment
+   * or repository state) gets the concise generic answer, because this plugin
+   * can neither re-observe it by reading a file nor tell "aged out" from "never
+   * seen here" for it. None of these promises a release: an unchanged file
+   * leaves the retry restriction — or its cooldown, for a timed condition — in
+   * place.
+   */
   function retryExplanation(fact: NegativeFact, current: PreconditionEvidence[]): string {
     const witnesses = fact.evidence.filter(e => e.role === 'precondition')
     const key = (e: PreconditionEvidence): string => {
@@ -648,12 +681,47 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
       return `${e.kind}:${e.root}`
     }
     const known = new Set(current.map(key))
-    const evidence = witnesses.length === 0
-      ? 'No precondition evidence was recorded.'
-      : witnesses.some(e => !known.has(key(e)))
-        ? 'Current precondition evidence is incomplete; no change has been confirmed.'
-        : 'Observed preconditions still match.'
+    // Recorded witnesses the comparison above could not speak to. Only a
+    // file-state witness whose cached observation has AGED OUT of the window is
+    // `expired` (the cache entry is what supplies the age); anything else is
+    // `unknown` — never observed in this context, or not a file at all.
+    const expired: string[] = []
+    const unknown: string[] = []
+    let unsupported = false
+    for (const witness of witnesses) {
+      if (known.has(key(witness))) continue
+      if (witness.kind !== 'file-state') {
+        unsupported = true
+        continue
+      }
+      const label = displayByModel.get(witness.path) ?? witness.path
+      const cached = observed.get(witness.path)
+      if (cached !== undefined && Date.now() - cached.at > commandEvidenceMaxAgeMs) expired.push(label)
+      else unknown.push(label)
+    }
     const condition = fact.retryCondition
+    // A timed condition really is a cooldown; every other restriction is
+    // released by clearance or a confirmed change, not by elapsed time.
+    const restriction = condition?.type === 'after' ? 'cooldown' : 'retry restriction'
+    let evidence: string
+    if (witnesses.length === 0) {
+      // No witness can ever mismatch: the fact is released by its retry
+      // condition alone, so saying "re-read the file" here would be a lie.
+      evidence = 'No precondition evidence was recorded with this failure, so re-reading files cannot release the retry early'
+        // No condition means nothing restricts the retry; do not name one.
+        + (condition === undefined ? '.' : `; the ${restriction} stands.`)
+    } else if (unsupported) {
+      // Re-reading a file says nothing about environment or repository state,
+      // so keep the pre-existing generic answer and make no freshness claim.
+      evidence = 'Current precondition evidence is incomplete; no change has been confirmed.'
+    } else if (expired.length === 0 && unknown.length === 0) {
+      evidence = 'Observed preconditions still match.'
+    } else {
+      evidence = 'Current precondition evidence is incomplete; no change has been confirmed'
+        + (expired.length > 0 ? ` — the recorded observation of ${pathList(expired)} is no longer fresh` : '')
+        + (unknown.length > 0 ? `${expired.length > 0 ? ';' : ' —'} no observation of ${pathList(unknown)} was recorded in this context` : '')
+        + `. Re-reading those files may confirm a change and enable an early retry; unchanged files leave the ${restriction} in place.`
+    }
     const retry = condition?.type === 'after'
       ? `Retry cooldown until ${sanitize(condition.at)}; after expiry a verification retry is permitted.`
       : condition?.type === 'manual'
@@ -755,7 +823,14 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
         leaseId: leaseRequest.leaseId,
         factId: entry.fact.id,
         owner: leaseRequest.owner,
-        staleAtGrant: entry.fact.status === 'stale',
+        // A stale-allow verdict IS "recorded preconditions changed", and the
+        // read-through above commits that staleness to the store — so the
+        // entry read BEFORE the transition cannot be asked whether the fact is
+        // stale: it is always still `active` on the first repair-driven retry,
+        // which would drop the withdrawal note exactly when it is most useful.
+        // The `status === 'stale'` arm keeps the note for a lease granted on a
+        // fact that was already stale without a witness mismatch.
+        staleAtGrant: verdict === 'stale-allow' || entry.fact.status === 'stale',
       })
       return undefined
     }
@@ -778,8 +853,13 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
       observed.set(target.displayPath, cached)
       const modelPath = actorModelPath(actor)
       if (modelPath !== undefined) {
-        observed.set(scopedModelKey(actorCwd(actor) ?? '', modelPath), cached)
-        displayByModel.set(modelPath, target.displayPath)
+        // Scoped by cwd exactly as the read path looks it up: one session's
+        // relative path must never resolve to another session's file. An
+        // unknown cwd keeps the bare model path, which is the same key a
+        // cwd-less failure looks up.
+        const scopedKey = scopedModelKey(actorCwd(actor) ?? '', modelPath)
+        observed.set(scopedKey, cached)
+        displayByModel.set(scopedKey, target.displayPath)
       }
       if (mode === 'off') return
       await enqueue(async () => {

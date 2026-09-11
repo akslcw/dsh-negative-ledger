@@ -40,6 +40,12 @@ for (const backend of ['jsonl', 'sqlite'] as const) describe(`retry contract (${
     assert.equal(denied?.kind, 'deny')
     assert.ok(denied?.kind === 'deny' && denied.reason.includes('No precondition evidence'))
     assert.ok(denied?.kind === 'deny' && denied.reason.includes('2026-09-10T00:00:05.000Z'))
+    // Nothing was recorded to compare against, so the message says the cooldown
+    // stands and does NOT suggest that re-reading the repaired file can release
+    // the retry early — that invitation is reserved for recorded evidence the
+    // freshness window has merely stopped covering.
+    assert.ok(denied?.kind === 'deny' && denied.reason.includes('cannot release the retry early'))
+    assert.ok(denied?.kind === 'deny' && !denied.reason.includes('may confirm a change and enable an early retry'))
     assert.equal((await f.store.queryFacts())[0]?.fact.status, 'active')
     t.mock.timers.tick(5000)
     const retry = f.exec()

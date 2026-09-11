@@ -126,3 +126,60 @@ describe('plugin over the SQLite store', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 })
+
+describe('cross-session evidence isolation (SQLite store)', () => {
+  function readExec(path: string, cwd: string): ExecLike {
+    return { name: 'read', arguments: { file_path: path }, agent: { session: { header: { cwd } } } }
+  }
+
+  const readNotFound: ResultLike = {
+    isError: true,
+    error: { message: 'cannot read: not found', info: { code: 'FS_NOT_FOUND' } },
+  }
+
+  /** The precondition witness paths a fact carries, in recorded order. */
+  function witnessPaths(fact: { evidence: readonly unknown[] }): string[] {
+    return (fact.evidence as { role: string; kind: string; path: string }[])
+      .filter(witness => witness.role === 'precondition' && witness.kind === 'file-state')
+      .map(witness => witness.path)
+  }
+
+  it('keeps one session\'s repair from releasing another session\'s missing file', async () => {
+    const dir = tempDir()
+    const store = new SqliteLedgerStore({ dir })
+    const policy = createLedgerPolicy(store, { mode: 'block' })
+    const sessionA = { header: { cwd: '/ws/a' } }
+    const sessionB = { header: { cwd: '/ws/b' } }
+    const observe = (displayPath: string, observation: { kind: 'absent' } | { kind: 'present'; version: string }, session: object) =>
+      policy.observeFs({ displayPath }, observation, {
+        name: 'read',
+        arguments: { file_path: 'config.json' },
+        agent: { session },
+      })
+    try {
+      // Interleaved: A's fact is recorded after B observed its own file.
+      await observe('/ws/a/config.json', { kind: 'absent' }, sessionA)
+      await observe('/ws/b/config.json', { kind: 'absent' }, sessionB)
+      await policy.postExecute(readExec('config.json', '/ws/a'), readNotFound)
+      const factA = (await store.queryFacts())
+        .map(entry => entry.fact)
+        .find(fact => fact.fingerprint.kind === 'file_missing' && fact.fingerprint.cwd === '/ws/a')
+      assert.ok(factA !== undefined, 'A\'s failure must be recorded as its own fact')
+      assert.deepEqual(witnessPaths(factA), ['/ws/a\u0000config.json', '/ws/a/config.json'])
+
+      // B's repair is not evidence about A's file.
+      await observe('/ws/b/config.json', { kind: 'present', version: 'v1' }, sessionB)
+      const denied = await policy.preExecute(readExec('config.json', '/ws/a'))
+      assert.equal(denied?.kind, 'deny')
+      assert.ok(denied?.kind === 'deny' && denied.reason.includes('Observed preconditions still match'))
+
+      // A's own repair releases A's fact.
+      await observe('/ws/a/config.json', { kind: 'present', version: 'v2' }, sessionA)
+      assert.equal(await policy.preExecute(readExec('config.json', '/ws/a')), undefined)
+    } finally {
+      await policy.drain()
+      await store.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

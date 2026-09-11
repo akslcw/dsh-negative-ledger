@@ -14,6 +14,7 @@ import { apply, createLedgerPolicy } from '../src/plugin.ts'
 import { JsonlLedgerStore } from '../src/store-jsonl.ts'
 import type { ExecLike, LedgerPolicyConfig, ResultLike } from '../src/plugin.ts'
 import type { DshContextLike } from '../src/plugin.ts'
+import type { NegativeFact } from '../src/types.ts'
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'negledger-plugin-'))
@@ -168,6 +169,55 @@ describe('block mode', () => {
   })
 })
 
+describe('cross-session evidence isolation', () => {
+  /** The precondition witness paths a fact carries, in recorded order. */
+  function witnessPaths(fact: NegativeFact): string[] {
+    return fact.evidence
+      .filter(witness => witness.role === 'precondition' && witness.kind === 'file-state')
+      .map(witness => witness.path)
+  }
+
+  /**
+   * Two sessions reading the SAME relative path from different cwds resolve to
+   * different files. Each fact must carry only its own session's file as
+   * evidence, so a repair in one workspace can never release the other's fact.
+   */
+  it('keeps one session\'s repair from releasing another session\'s missing file', async () => {
+    const fixture = await setup('block')
+    const sessionA = { header: { cwd: '/ws/a' } }
+    const sessionB = { header: { cwd: '/ws/b' } }
+    const observe = (displayPath: string, observation: { kind: 'absent' } | { kind: 'present'; version: string }, session: object) =>
+      fixture.policy.observeFs({ displayPath }, observation, {
+        name: 'read',
+        arguments: { file_path: 'config.json' },
+        agent: { session },
+      })
+
+    // Both sessions are told the file is missing, in interleaved order: A's
+    // fact is recorded after B's observation, which is what used to alias.
+    await observe('/ws/a/config.json', { kind: 'absent' }, sessionA)
+    await observe('/ws/b/config.json', { kind: 'absent' }, sessionB)
+    await fixture.policy.postExecute(readExec('config.json', '/ws/a'), readNotFound())
+    const factA = (await fixture.store.queryFacts())
+      .map(entry => entry.fact)
+      .find(fact => fact.fingerprint.kind === 'file_missing' && fact.fingerprint.cwd === '/ws/a')
+    assert.ok(factA !== undefined, 'A\'s failure must be recorded as its own fact')
+    assert.deepEqual(witnessPaths(factA), ['/ws/a\u0000config.json', '/ws/a/config.json'])
+
+    // B repairs its own file. A's file is still missing, so A's retry must
+    // stay blocked — B's file is not evidence about A's.
+    await observe('/ws/b/config.json', { kind: 'present', version: 'v1' }, sessionB)
+    const denied = await fixture.policy.preExecute(readExec('config.json', '/ws/a'))
+    assert.equal(denied?.kind, 'deny')
+    assert.ok(denied?.kind === 'deny' && denied.reason.includes('Observed preconditions still match'))
+
+    // A's own repair is the one that releases it.
+    await observe('/ws/a/config.json', { kind: 'present', version: 'v2' }, sessionA)
+    assert.equal(await fixture.policy.preExecute(readExec('config.json', '/ws/a')), undefined)
+    cleanup(fixture)
+  })
+})
+
 describe('recording', () => {
   it('records command failures without raw commands in the claim, with TTL and sanitized stderr', async () => {
     const fixture = await setup()
@@ -317,6 +367,49 @@ describe('audit round fixes', () => {
     const outcome = await fixture.policy.preExecute(bashExec('npm lint'))
     assert.equal(outcome?.kind, 'deny')
     assert.ok(outcome?.kind === 'deny' && outcome.reason.includes('explicit manual clearance'))
+    cleanup(fixture)
+  })
+
+  it('P2: scopes the recovery hint to file-state witnesses and to the real restriction', async () => {
+    const fixture = await setup('block')
+    // An environment witness cannot be re-observed by reading a file, so the
+    // message keeps the generic answer and claims nothing about freshness.
+    await fixture.store.recordFact({
+      kind: 'command_failed',
+      scope: '',
+      fingerprint: JSON.stringify({ kind: 'command_failed', tool: 'bash', commandLine: 'npm deploy' }),
+      claim: 'npm deploy needs the release key',
+      evidence: [
+        { role: 'outcome', kind: 'command-exit', exitCode: 1, stderrSignature: 'x' },
+        { role: 'precondition', kind: 'env-state', key: 'RELEASE_KEY', valueHash: 'h1' },
+      ],
+      retryCondition: { type: 'manual' },
+    }, { operationId: 'seed-3' })
+    const envDenied = await fixture.policy.preExecute(bashExec('npm deploy'))
+    assert.equal(envDenied?.kind, 'deny')
+    assert.ok(envDenied?.kind === 'deny' && envDenied.reason.includes('Current precondition evidence is incomplete; no change has been confirmed.'))
+    assert.ok(envDenied?.kind === 'deny' && !envDenied.reason.includes('Re-reading those files'))
+    assert.ok(envDenied?.kind === 'deny' && !envDenied.reason.includes('is no longer fresh'))
+    assert.ok(envDenied?.kind === 'deny' && !envDenied.reason.includes('cooldown'))
+
+    // A never-observed file witness IS re-readable, but `manual` is not a timed
+    // cooldown, so the hint names the retry restriction rather than a cooldown.
+    await fixture.store.recordFact({
+      kind: 'command_failed',
+      scope: '',
+      fingerprint: JSON.stringify({ kind: 'command_failed', tool: 'bash', commandLine: 'npm publish' }),
+      claim: 'npm publish needs the version bumped',
+      evidence: [
+        { role: 'outcome', kind: 'command-exit', exitCode: 1, stderrSignature: 'x' },
+        { role: 'precondition', kind: 'file-state', path: '/ws/package.json', observed: 'present', version: 'v1' },
+      ],
+      retryCondition: { type: 'manual' },
+    }, { operationId: 'seed-4' })
+    const fileDenied = await fixture.policy.preExecute(bashExec('npm publish'))
+    assert.equal(fileDenied?.kind, 'deny')
+    assert.ok(fileDenied?.kind === 'deny' && fileDenied.reason.includes('no observation of /ws/package.json was recorded in this context'))
+    assert.ok(fileDenied?.kind === 'deny' && fileDenied.reason.includes('leave the retry restriction in place'))
+    assert.ok(fileDenied?.kind === 'deny' && !fileDenied.reason.includes('cooldown'))
     cleanup(fixture)
   })
 })
