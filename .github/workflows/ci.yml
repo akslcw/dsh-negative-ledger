@@ -6,6 +6,25 @@ on:
   pull_request:
 
 jobs:
+  real-dsh-smoke:
+    # One bounded, keyless Linux host check, independent of the platform matrix.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            smoke/host-fixture/package-lock.json
+      - run: npm ci --ignore-scripts
+      - name: Install locked real DSH runtime
+        run: npm ci --prefix smoke/host-fixture --ignore-scripts --no-audit --no-fund
+      - name: Exercise real filesystem and bash tool pipeline
+        run: timeout 120s npm run smoke:real-dsh -- smoke/host-fixture/node_modules
+
   test:
     strategy:
       fail-fast: false
