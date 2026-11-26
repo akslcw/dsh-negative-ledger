@@ -78,8 +78,10 @@ export type FsObservationLike =
   | { readonly kind: 'present'; readonly version: string }
   | { readonly kind: 'absent' }
 
-/** Model-facing context message shape (a DSH `UserMessage` structurally). */
+/** Model-facing context message (a DSH `UserMessage`). */
 export interface ContextMessage {
+  readonly id: string
+  readonly role: 'user'
   readonly content: Array<{ readonly type: 'text'; readonly text: string }>
   readonly source: {
     readonly kind: 'plugin'
@@ -645,6 +647,11 @@ export function createLedgerPolicy(store: LedgerStore, config: LedgerPolicyConfi
 
   function message(text: string, summary: string): ContextMessage {
     return {
+      // DSH persists `additionalContexts` verbatim as `user/message` events and
+      // re-validates identity on restore, so every context needs its own id
+      // and the user role before it leaves this boundary.
+      id: randomUUID(),
+      role: 'user',
       content: [{ type: 'text', text }],
       source: { kind: 'plugin', plugin: 'negative-ledger', form: 'notice', summary },
     }
