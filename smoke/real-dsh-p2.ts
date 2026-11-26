@@ -17,7 +17,7 @@ const { Context } = await import(pathToFileURL(join(modules, '@deepseek-ai/cordi
 const { default: LocalFileSystem } = await host('fs-local')
 const ToolFs = await host('tool-fs')
 const { ToolCallId, createUserMessage, LlmAdapter } = await host('llm')
-const { SessionId } = await host('session')
+const { SessionId, snapshotSessionEvent } = await host('session')
 // --- scripted adapter (mirrors the agent-loop test mock) --------------------
 
 function textResponse(text: string): StreamChunk[] {
@@ -94,6 +94,16 @@ try {
   }
   await ctx.plugin(LocalFileSystem, { cwd: workspace })
   await ctx.plugin(ToolFs)
+  // Capture every context the plugin hands to the harness. DSH persists each
+  // one verbatim as a `user/message` event and re-validates it on restore, so
+  // feeding it through the real validator here exercises the exact contract
+  // whose violation made sessions unloadable (issue #2).
+  const emittedContexts: unknown[] = []
+  ctx.on('tools/post-execute', async (_exec: unknown, _result: unknown, next: () => Promise<{ additionalContexts?: unknown[] }>) => {
+    const decision = await next()
+    emittedContexts.push(...decision.additionalContexts ?? [])
+    return decision
+  })
   await ctx.plugin(ledgerPlugin, { mode: 'warn', dir: ledgerDir })
   ctx.llm.registerAdapter(['mock'], adapter)
   const handle = await ctx.agents.create({
@@ -123,6 +133,19 @@ try {
     'cumulative counters belong in stats, not model context')
   assert.ok(requestText(adapter.requests[4]!).includes('verification is allowed'),
     'evidence change must withdraw the warning and allow the retry')
+
+  // Every emitted context must survive DSH's own restore validation and carry
+  // its own identity. A context missing `id`/`role` is persisted happily and
+  // only breaks the session on the next load (issue #2).
+  assert.equal(emittedContexts.length, 2, `expected the warning and the withdrawal note, got ${emittedContexts.length}`)
+  const contextIds = new Set<string>()
+  for (const context of emittedContexts) {
+    snapshotSessionEvent({ type: 'user/message', seq: 0, time: Date.now(), surfaceOp: 'append', data: context })
+    const id = (context as { id?: unknown }).id
+    assert.equal(typeof id, 'string', 'every context must carry a string id')
+    assert.ok(!contextIds.has(id as string), 'every context must carry its own id')
+    contextIds.add(id as string)
+  }
 
   // The ledger (default sqlite backend) must hold one logical fact, resolved
   // by the successful retry, with the audit transition and honest counters.

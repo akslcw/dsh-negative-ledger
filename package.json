@@ -1,6 +1,6 @@
 {
   "name": "@akslcw/dsh-negative-ledger",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Agent negative-knowledge ledger for DeepSeek Harness: records failed paths with evidence hashes and retry conditions, auto-invalidates on evidence change.",
   "type": "module",
   "license": "MIT",
